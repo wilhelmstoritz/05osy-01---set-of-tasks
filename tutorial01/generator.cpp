@@ -5,17 +5,17 @@
 
 int main(int t_argc, char** t_argv) {
     /*
-    for(int i = 0; i < t_argc; i++)
+    for (int i = 0; i < t_argc; i++)
         printf("%s\n", t_argv[i]);
     */
 
     if (t_argc < 2) {
-        printf("malao oarametru!\n");
+        printf("malo parametru!\n");
         exit(1);
     }
 
     int n = atoi(t_argv[1]);
-    for(int i = 0; i < n; i++)
+    for (int i = 0; i < n; i++)
         printf("%d\n", rand() % 100000);
 
     //std::cout << "chci umrit!\n";
