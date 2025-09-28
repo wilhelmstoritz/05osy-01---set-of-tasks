@@ -16,7 +16,7 @@ LDFLAGS_VER += -Lvercore_account -Lvercore_pid
 LDLIBS_GEN += -l$(LIBNAME_GEN)
 LDLIBS_VER += -l$(LIBNAME_VER)
 
-all: $(TARGET_GEN) $(TARGET_VER)
+all: $(TARGET_GEN) $(LIBFILE_VER_ACCOUNT) $(LIBFILE_VER_PID) $(TARGET_VER)
 
 # static library
 $(LIBFILE_GEN): gennumcore.o
