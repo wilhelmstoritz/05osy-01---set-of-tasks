@@ -29,6 +29,7 @@ $(LIBFILE_VER_ACCOUNT): vercore_account/vercore.o
 $(LIBFILE_VER_PID): vercore_pid/vercore.o
 	g++ $(CPPFLAGS) $^ -shared $(LDFLAGS_VER) -o $@
 
+# executables
 $(TARGET_GEN): $(TARGET_GEN).cpp $(LIBFILE_GEN)
 	g++ $(CPPFLAGS) $< $(LDFLAGS_GEN) $(LDLIBS_GEN) -o $@
 

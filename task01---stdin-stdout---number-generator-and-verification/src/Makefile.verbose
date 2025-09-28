@@ -38,6 +38,7 @@ $(LIBFILE_VER_PID): vercore_pid/vercore.o
 	g++ $(CPPFLAGS) $^ -shared $(LDFLAGS_VER) -o $@
 #	@echo "'$(LIBFILE_VER_PID)'\n"
 
+# executables
 $(TARGET_GEN): $(TARGET_GEN).cpp $(LIBFILE_GEN)
 #	@echo -n "application... "
 	g++ $(CPPFLAGS) $< $(LDFLAGS_GEN) $(LDLIBS_GEN) -o $@
