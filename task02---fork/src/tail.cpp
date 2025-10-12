@@ -176,15 +176,15 @@ int main(int argc, char** argv) {
     std::vector<std::string> valid_files;
 
     // arguments
-    printf("--- processing %d argument(s) ----------------------\n", argc - 1);
+    printf("--- processing argument(s) -------------------------\n");
     for (int i = 1; i < argc; i++) {
-        //printf("checking: '%s'\n", argv[i]);
+        printf("checking: '%s'\n", argv[i]);
         
         if (is_valid_file(argv[i])) {
             valid_files.push_back(argv[i]);
-            //printf(" > VALID: added to processing list\n");
+            //printf("info | valid; added to processing list\n");
         } else {
-            //printf(" > SKIPPED\n");
+            //printf("info | skipped\n");
         }
         //printf("\n");
     }
