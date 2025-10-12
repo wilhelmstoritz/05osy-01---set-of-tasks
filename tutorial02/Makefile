@@ -1,4 +1,4 @@
-TARGET1=main
+TARGET1=testfork
 
 all: $(TARGET1)
 
