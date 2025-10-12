@@ -7,3 +7,4 @@ $(TARGET1): $(TARGET1).cpp
 
 clean:
 	rm -f $(TARGET1)
+	rm -f stop

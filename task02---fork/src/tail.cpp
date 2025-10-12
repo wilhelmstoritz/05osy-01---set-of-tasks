@@ -50,7 +50,7 @@ void print_file_info(const char* t_filepath, off_t* last_size) {
     }
     
     pid_t pid = getpid();
-    printf("\n[child %d] === file: %s ==========\n", pid, t_filepath);
+    printf("\n[child %d] === '%s' file info ===================\n", pid, t_filepath);
     
     // mode (permissions)
     printf("[child %d] mode . . . . . . : %o (octal)\n", pid, file_stat.st_mode & 0777);
@@ -81,6 +81,8 @@ void print_file_info(const char* t_filepath, off_t* last_size) {
     printf("[child %d] process ID . . . : %d\n", pid, pid);
     printf("[child %d] parent process ID: %d\n", pid, getppid());
 
+    printf("[child %d] === end of '%s' file info ============\n\n", pid, t_filepath);
+
     // update last size
     if (last_size) {
         *last_size = file_stat.st_size;
@@ -94,7 +96,7 @@ void monitor_file(const char* t_filepath, int pipe_fd) {
     
     // print initial file information
     print_file_info(t_filepath, &last_size);
-    printf("[child %d] waiting for check commands...\n", pid);
+    printf("[child %d] info | waiting for check commands...\n", pid);
     
     char buffer[256];
     
@@ -104,7 +106,7 @@ void monitor_file(const char* t_filepath, int pipe_fd) {
         
         if (bytes_read <= 0) {
             // pipe closed or error
-            printf("[child %d] pipe closed, exiting...\n", pid);
+            printf("[child %d] info | pipe closed, exiting...\n", pid);
             break;
         }
         
@@ -121,7 +123,7 @@ void monitor_file(const char* t_filepath, int pipe_fd) {
             
             // check if file has grown
             if (file_stat.st_size > last_size) {
-                printf("\n[child %d] file '%s' has grown from %ld to %ld bytes\n", 
+                printf("[child %d] info | file '%s' has grown from %ld to %ld bytes\n", 
                        pid, t_filepath, last_size, file_stat.st_size);
                 
                 // read and display new content
@@ -131,20 +133,20 @@ void monitor_file(const char* t_filepath, int pipe_fd) {
                     off_t seek_pos = (last_size > 0) ? last_size : 0;
                     fseek(fp, seek_pos, SEEK_SET);
                     
-                    printf("[child %d] === new content: ==========\n", pid);
+                    printf("\n[child %d] === '%s' new content: ================\n", pid, t_filepath);
                     char line[1024];
                     while (fgets(line, sizeof(line), fp)) {
                         printf("[child %d] %s", pid, line);
                     }
-                    printf("[child %d] === end of new content ==========\n", pid);
-                    
+                    printf("[child %d] === end of '%s' new content ==========\n", pid, t_filepath);
+
                     fclose(fp);
                 }
                 
                 // print updated file information
                 print_file_info(t_filepath, &last_size);
             } else {
-                printf("[child %d] no changes in file '%s'\n", pid, t_filepath);
+                printf("[child %d] info | no changes in file '%s'\n", pid, t_filepath);
             }
         }
     }
@@ -156,6 +158,15 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: %s <file1> [file2] ...\n", argv[0]);
         fprintf(stderr, "example: %s *.txt\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+    
+    // ------------------------------------------------------------------------
+    // step 4: check for 'stop' file before starting
+    // ------------------------------------------------------------------------
+    if (access("stop", F_OK) == 0) {
+        fprintf(stderr, "[error] 'stop' file exists in current directory\n");
+        fprintf(stderr, "[hint] remove 'stop' file before running the program\n");
         return EXIT_FAILURE;
     }
     
@@ -198,7 +209,7 @@ int main(int argc, char** argv) {
     // step 2 & 3: create pipes and child processes for each valid file
     // ------------------------------------------------------------------------
     printf("\n--- processing files with child processes ----------\n");
-    printf("parent process ID: %d\n", getpid());
+    printf("[parent] info | process ID: %d\n", getpid());
     
     std::vector<pid_t> child_pids;
     std::vector<int> pipe_write_fds; // parent writes to these
@@ -232,6 +243,7 @@ int main(int argc, char** argv) {
             }
             
             // monitor the file
+            usleep(30000); // 30 ms; gives parent time to print info; keeps console output organized and readable
             monitor_file(valid_files[i].c_str(), pipefd[0]);
             
             exit(EXIT_SUCCESS);
@@ -244,25 +256,37 @@ int main(int argc, char** argv) {
             child_pids.push_back(pid);
             pipe_write_fds.push_back(pipefd[1]);
             
-            printf("[parent] created child process %d with pipe for file '%s'\n",pid, valid_files[i].c_str());
+            printf("[parent] info | created child process %d with pipe for file '%s'\n",pid, valid_files[i].c_str());
         }
+
+        // small delay to avoid overwhelming output; keeps console output organized and readable
+        usleep(100000); // 100 ms
     }
     
     // ------------------------------------------------------------------------
-    // step 3: parent sends "check\n" commands every second
+    // step 3 & 4: parent sends "check\n" commands and monitors for 'stop' file
     // ------------------------------------------------------------------------
-    printf("\n[parent] starting monitoring loop...\n");
-    printf("[parent] press ctrl+c to stop\n\n");
+    printf("[parent] info | starting monitoring loop...\n");
+    printf("[parent] hint | to stop monitoring, create 'stop' file\n");
     
     // give children time to initialize
     sleep(1);
     
     int check_count = 0;
-    while (true) {
+    bool stop_requested = false;
+    
+    while (!stop_requested) {
         sleep(1);
         check_count++;
         
-        printf("[parent] sending check command #%d to all children...\n", check_count);
+        // check for 'stop' file
+        if (access("stop", F_OK) == 0) {
+            printf("[parent] info | 'stop' file detected, initiating shutdown...\n");
+            stop_requested = true;
+            break;
+        }
+
+        printf("[parent] info | sending check command #%d to all children...\n", check_count);
         
         // send "check\n" to all children
         for (size_t i = 0; i < pipe_write_fds.size(); i++) {
@@ -272,19 +296,39 @@ int main(int argc, char** argv) {
             if (written < 0) {
                 fprintf(stderr, "[parent] error | failed to write to pipe for child %lu\n", i);
             }
+
+            // small delay to give children time to process; keeps console output organized and readable
+            usleep(30000); // 30 ms
         }
     }
     
-    // cleanup (this code won't be reached unless we add signal handling)
+    // cleanup - close all pipes to signal children to exit
+    printf("[parent] info | closing all pipes...\n");
     for (size_t i = 0; i < pipe_write_fds.size(); i++) {
         close(pipe_write_fds[i]);
     }
     
-    // wait for all children
+    // wait for all children to complete
+    printf("[parent] info | waiting for all child processes to complete...\n");
+    int completed = 0;
     for (size_t i = 0; i < child_pids.size(); i++) {
         int status;
-        waitpid(child_pids[i], &status, 0);
+        pid_t finished_pid = waitpid(child_pids[i], &status, 0);
+        
+        if (finished_pid > 0) {
+            completed++;
+            if (WIFEXITED(status)) {
+                printf("[parent] info | child process %d finished with exit code %d\n", 
+                       finished_pid, WEXITSTATUS(status));
+            } else {
+                printf("[parent] info | child process %d terminated abnormally\n", finished_pid);
+            }
+        }
     }
+    
+    printf("[parent] info | all child processes completed (%d/%lu)\n", completed, child_pids.size());
+    printf("[parent] info | monitoring stopped\n");
+    printf("[parent] hint | remember to remove 'stop' file before next run\n");
     
     return EXIT_SUCCESS;
 }
