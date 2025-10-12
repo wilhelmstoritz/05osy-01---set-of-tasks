@@ -1,9 +1,9 @@
-TARGET1=test
+TARGET1=tail
 
 all: $(TARGET1)
 
 $(TARGET1): $(TARGET1).cpp
-	g++ $^ -o $@
+	g++ -std=c++11 $^ -o $@
 
 clean:
 	rm -f $(TARGET1)
