@@ -123,8 +123,8 @@ void monitor_file(const char* t_filepath, int pipe_fd) {
             
             // check if file has grown
             if (file_stat.st_size > last_size) {
-                printf("[child %d] info | file '%s' has grown from %ld to %ld bytes\n", 
-                       pid, t_filepath, last_size, file_stat.st_size);
+                printf("[child %d] info | file '%s' has grown from %ld to %ld bytes\n",
+                    pid, t_filepath, last_size, file_stat.st_size);
                 
                 // read and display new content
                 FILE* fp = fopen(t_filepath, "r");
@@ -162,7 +162,7 @@ int main(int argc, char** argv) {
     }
     
     // ------------------------------------------------------------------------
-    // step 4: check for 'stop' file before starting
+    // task 4: check for 'stop' file before starting
     // ------------------------------------------------------------------------
     if (access("stop", F_OK) == 0) {
         fprintf(stderr, "[error] 'stop' file exists in current directory\n");
@@ -171,7 +171,7 @@ int main(int argc, char** argv) {
     }
     
     // ------------------------------------------------------------------------
-    // step 1: create list of valid files
+    // task 1: create list of valid files
     // ------------------------------------------------------------------------
     std::vector<std::string> valid_files;
 
@@ -206,7 +206,7 @@ int main(int argc, char** argv) {
     }
     
     // ------------------------------------------------------------------------
-    // step 2 & 3: create pipes and child processes for each valid file
+    // task 2 & 3: create pipes and child processes for each valid file
     // ------------------------------------------------------------------------
     printf("\n--- processing files with child processes ----------\n");
     printf("[parent] info | process ID: %d\n", getpid());
@@ -264,7 +264,7 @@ int main(int argc, char** argv) {
     }
     
     // ------------------------------------------------------------------------
-    // step 3 & 4: parent sends "check\n" commands and monitors for 'stop' file
+    // task 3 & 4: parent sends "check\n" commands and monitors for 'stop' file
     // ------------------------------------------------------------------------
     printf("[parent] info | starting monitoring loop...\n");
     printf("[parent] hint | to stop monitoring, create 'stop' file\n");
