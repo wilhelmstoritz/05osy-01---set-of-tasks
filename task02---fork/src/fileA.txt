@@ -1,0 +1,2 @@
+file A: line 1
+file A: line 2 at 12:48:01

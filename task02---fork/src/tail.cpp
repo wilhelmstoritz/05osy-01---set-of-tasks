@@ -89,14 +89,91 @@ void print_file_info(const char* t_filepath, off_t* last_size) {
     }
 }
 
+// print file information header (called by child process)
+void print_file_header(const char* t_filepath, off_t old_size, off_t new_size) {
+    struct stat file_stat;
+    
+    if (stat(t_filepath, &file_stat) != 0) {
+        fprintf(stderr, "[child] error | cannot stat file '%s'\n", t_filepath);
+        return;
+    }
+    
+    pid_t pid = getpid();
+    printf("\n[child %d] === '%s' change detected ================\n", pid, t_filepath);
+    printf("[child %d] file. . . . . . : %s\n", pid, t_filepath);
+    printf("[child %d] process ID . . . : %d\n", pid, pid);
+    printf("[child %d] old size. . . . : %ld bytes\n", pid, old_size);
+    printf("[child %d] new size. . . . : %ld bytes\n", pid, new_size);
+    
+    // modification time
+    struct tm* timeinfo = localtime(&file_stat.st_mtime);
+    char time_str[80];
+    asctime_r(timeinfo, time_str);
+    time_str[strcspn(time_str, "\n")] = 0;
+    printf("[child %d] last modified. . : %s\n", pid, time_str);
+    printf("[child %d] ================================================\n\n", pid);
+}
+
+// logger child process - reads from all monitoring children and logs to file
+void logger_process(int read_fd, const char* logfile) {
+    pid_t pid = getpid();
+    fprintf(stderr, "[logger %d] info | logger process started, logging to '%s'\n", pid, logfile);
+    
+    // open log file for writing (or use tty device)
+    FILE* log_fp = fopen(logfile, "w");
+    if (!log_fp) {
+        fprintf(stderr, "[logger %d] error | cannot open logfile '%s'\n", pid, logfile);
+        close(read_fd);
+        exit(EXIT_FAILURE);
+    }
+    
+    char buffer[4096];
+    while (true) {
+        ssize_t bytes_read = read(read_fd, buffer, sizeof(buffer) - 1);
+        
+        if (bytes_read <= 0) {
+            // pipe closed or error
+            fprintf(stderr, "[logger %d] info | pipe closed, exiting...\n", pid);
+            break;
+        }
+        
+        buffer[bytes_read] = '\0';
+        
+        // check for 'nolog' file before each output
+        if (access("nolog", F_OK) != 0) {
+            // 'nolog' file does NOT exist, so we can write to output
+            fprintf(log_fp, "%s", buffer);
+            fflush(log_fp);
+        }
+        // if 'nolog' exists, we still read from pipe but don't write to output
+    }
+    
+    fclose(log_fp);
+    close(read_fd);
+}
+
 // child process monitoring function
-void monitor_file(const char* t_filepath, int pipe_fd) {
+void monitor_file(const char* t_filepath, int pipe_fd, int logger_fd) {
     pid_t pid = getpid();
     off_t last_size = -1; // initialize to -1 to force reading initial size
-    
+
     // print initial file information
-    print_file_info(t_filepath, &last_size);
-    printf("[child %d] info | waiting for check commands...\n", pid);
+    //print_file_info(t_filepath, &last_size);
+    
+    // redirect stdout to logger pipe
+    dup2(logger_fd, STDOUT_FILENO);
+    close(logger_fd);
+    
+    // get initial file size
+    struct stat file_stat;
+    if (stat(t_filepath, &file_stat) == 0) {
+        last_size = file_stat.st_size;
+    }
+    
+    //printf("[child %d] info | waiting for check commands...\n", pid);
+    printf("[child %d] info | monitoring file '%s' (initial size: %ld bytes)\n", 
+           pid, t_filepath, last_size);
+    fflush(stdout);
     
     char buffer[256];
     
@@ -107,6 +184,7 @@ void monitor_file(const char* t_filepath, int pipe_fd) {
         if (bytes_read <= 0) {
             // pipe closed or error
             printf("[child %d] info | pipe closed, exiting...\n", pid);
+            fflush(stdout);
             break;
         }
         
@@ -115,7 +193,7 @@ void monitor_file(const char* t_filepath, int pipe_fd) {
         // check if we received "check\n"
         if (strstr(buffer, "check\n") != NULL) {
             struct stat file_stat;
-            
+
             if (stat(t_filepath, &file_stat) != 0) {
                 fprintf(stderr, "[child %d] error | cannot stat file '%s'\n", pid, t_filepath);
                 continue;
@@ -148,6 +226,7 @@ void monitor_file(const char* t_filepath, int pipe_fd) {
             } else {
                 printf("[child %d] info | no changes in file '%s'\n", pid, t_filepath);
             }
+            fflush(stdout);
         }
     }
     
@@ -155,10 +234,27 @@ void monitor_file(const char* t_filepath, int pipe_fd) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        fprintf(stderr, "usage: %s <file1> [file2] ...\n", argv[0]);
-        fprintf(stderr, "example: %s *.txt\n", argv[0]);
+    // ------------------------------------------------------------------------
+    // parse arguments for -l logfile
+    // ------------------------------------------------------------------------
+    const char* logfile = nullptr;
+    int first_file_arg = 1;
+    
+    if (argc >= 3 && strcmp(argv[1], "-l") == 0) {
+        logfile = argv[2];
+        first_file_arg = 3;
+    }
+    
+    if (first_file_arg >= argc) {
+        fprintf(stderr, "usage: %s [-l logfile] <file1> [file2] ...\n", argv[0]);
+        fprintf(stderr, "example: %s -l output.log *.txt\n", argv[0]);
+        fprintf(stderr, "example: %s -l /dev/pts/0 *.txt\n", argv[0]);
         return EXIT_FAILURE;
+    }
+    
+    // if no logfile specified, use stdout (via /dev/stdout)
+    if (!logfile) {
+        logfile = "/dev/stdout";
     }
     
     // ------------------------------------------------------------------------
@@ -176,40 +272,62 @@ int main(int argc, char** argv) {
     std::vector<std::string> valid_files;
 
     // arguments
-    printf("--- processing argument(s) -------------------------\n");
-    for (int i = 1; i < argc; i++) {
-        printf("checking: '%s'\n", argv[i]);
+    fprintf(stderr, "--- processing argument(s) -------------------------\n");
+    for (int i = first_file_arg; i < argc; i++) {
+        fprintf(stderr, "checking: '%s'\n", argv[i]);
         
         if (is_valid_file(argv[i])) {
             valid_files.push_back(argv[i]);
-            //printf("info | valid; added to processing list\n");
-        } else {
-            //printf("info | skipped\n");
         }
-        //printf("\n");
     }
     
     // summary
-    printf("\n--- summary ----------------------------------------\n");
-    printf("total arguments: %d\n", argc - 1);
-    printf("valid files. . : %lu\n", valid_files.size());
-    printf("skipped. . . . : %d\n", argc - 1 - (int)valid_files.size());
+    fprintf(stderr, "\n--- summary ----------------------------------------\n");
+    fprintf(stderr, "total arguments: %d\n", argc - first_file_arg);
+    fprintf(stderr, "valid files. . : %lu\n", valid_files.size());
+    fprintf(stderr, "skipped. . . . : %d\n", argc - first_file_arg - (int)valid_files.size());
+    fprintf(stderr, "logfile. . . . : %s\n", logfile);
     
     if (valid_files.empty()) {
         fprintf(stderr, "[error] no valid files to process\n");
         return EXIT_FAILURE;
     }
     
-    printf("\n--- valid files for processing ---------------------\n");
+    fprintf(stderr, "\n--- valid files for processing ---------------------\n");
     for (size_t i = 0; i < valid_files.size(); i++) {
-        printf("%lu. %s\n", i + 1, valid_files[i].c_str());
+        fprintf(stderr, "%lu. %s\n", i + 1, valid_files[i].c_str());
     }
     
     // ------------------------------------------------------------------------
     // task 2 & 3: create pipes and child processes for each valid file
     // ------------------------------------------------------------------------
-    printf("\n--- processing files with child processes ----------\n");
-    printf("[parent] info | process ID: %d\n", getpid());
+    fprintf(stderr, "\n--- processing files with child processes ----------\n");
+    fprintf(stderr, "[parent] info | process ID: %d\n", getpid());
+    
+    // create logger pipe
+    int logger_pipe[2];
+    if (pipe(logger_pipe) == -1) {
+        fprintf(stderr, "[parent] error | logger pipe creation failed\n");
+        return EXIT_FAILURE;
+    }
+    
+    // create logger child process
+    pid_t logger_pid = fork();
+    if (logger_pid < 0) {
+        fprintf(stderr, "[parent] error | fork failed for logger process\n");
+        close(logger_pipe[0]);
+        close(logger_pipe[1]);
+        return EXIT_FAILURE;
+    } else if (logger_pid == 0) {
+        // logger child process
+        close(logger_pipe[1]); // close write end
+        logger_process(logger_pipe[0], logfile);
+        exit(EXIT_SUCCESS);
+    }
+    
+    // parent process - close read end, keep write end for monitoring children
+    close(logger_pipe[0]);
+    fprintf(stderr, "[parent] info | created logger process %d\n", logger_pid);
     
     std::vector<pid_t> child_pids;
     std::vector<int> pipe_write_fds; // parent writes to these
@@ -244,7 +362,7 @@ int main(int argc, char** argv) {
             
             // monitor the file
             usleep(30000); // 30 ms; gives parent time to print info; keeps console output organized and readable
-            monitor_file(valid_files[i].c_str(), pipefd[0]);
+            monitor_file(valid_files[i].c_str(), pipefd[0], logger_pipe[1]);
             
             exit(EXIT_SUCCESS);
         } else {
@@ -256,7 +374,7 @@ int main(int argc, char** argv) {
             child_pids.push_back(pid);
             pipe_write_fds.push_back(pipefd[1]);
             
-            printf("[parent] info | created child process %d with pipe for file '%s'\n",pid, valid_files[i].c_str());
+            fprintf(stderr, "[parent] info | created child process %d with pipe for file '%s'\n",pid, valid_files[i].c_str());
         }
 
         // small delay to avoid overwhelming output; keeps console output organized and readable
@@ -266,8 +384,8 @@ int main(int argc, char** argv) {
     // ------------------------------------------------------------------------
     // task 3 & 4: parent sends "check\n" commands and monitors for 'stop' file
     // ------------------------------------------------------------------------
-    printf("[parent] info | starting monitoring loop...\n");
-    printf("[parent] hint | to stop monitoring, create 'stop' file\n");
+    fprintf(stderr, "[parent] info | starting monitoring loop...\n");
+    fprintf(stderr, "[parent] hint | to stop monitoring, create 'stop' file\n");
     
     // give children time to initialize
     sleep(1);
@@ -281,12 +399,12 @@ int main(int argc, char** argv) {
         
         // check for 'stop' file
         if (access("stop", F_OK) == 0) {
-            printf("[parent] info | 'stop' file detected, initiating shutdown...\n");
+            fprintf(stderr, "[parent] info | 'stop' file detected, initiating shutdown...\n");
             stop_requested = true;
             break;
         }
 
-        printf("[parent] info | sending check command #%d to all children...\n", check_count);
+        fprintf(stderr, "[parent] info | sending check command #%d to all children...\n", check_count);
         
         // send "check\n" to all children
         for (size_t i = 0; i < pipe_write_fds.size(); i++) {
@@ -303,13 +421,16 @@ int main(int argc, char** argv) {
     }
     
     // cleanup - close all pipes to signal children to exit
-    printf("[parent] info | closing all pipes...\n");
+    fprintf(stderr, "[parent] info | closing all pipes...\n");
     for (size_t i = 0; i < pipe_write_fds.size(); i++) {
         close(pipe_write_fds[i]);
     }
     
+    // close logger pipe write end to signal logger to exit
+    close(logger_pipe[1]);
+    
     // wait for all children to complete
-    printf("[parent] info | waiting for all child processes to complete...\n");
+    fprintf(stderr, "[parent] info | waiting for all child processes to complete...\n");
     int completed = 0;
     for (size_t i = 0; i < child_pids.size(); i++) {
         int status;
@@ -318,17 +439,25 @@ int main(int argc, char** argv) {
         if (finished_pid > 0) {
             completed++;
             if (WIFEXITED(status)) {
-                printf("[parent] info | child process %d finished with exit code %d\n", 
+                fprintf(stderr, "[parent] info | child process %d finished with exit code %d\n", 
                        finished_pid, WEXITSTATUS(status));
             } else {
-                printf("[parent] info | child process %d terminated abnormally\n", finished_pid);
+                fprintf(stderr, "[parent] info | child process %d terminated abnormally\n", finished_pid);
             }
         }
     }
     
-    printf("[parent] info | all child processes completed (%d/%lu)\n", completed, child_pids.size());
-    printf("[parent] info | monitoring stopped\n");
-    printf("[parent] hint | remember to remove 'stop' file before next run\n");
+    // wait for logger process
+    int status;
+    waitpid(logger_pid, &status, 0);
+    if (WIFEXITED(status)) {
+        fprintf(stderr, "[parent] info | logger process %d finished with exit code %d\n", 
+               logger_pid, WEXITSTATUS(status));
+    }
+    
+    fprintf(stderr, "[parent] info | all child processes completed (%d/%lu)\n", completed, child_pids.size());
+    fprintf(stderr, "[parent] info | monitoring stopped\n");
+    fprintf(stderr, "[parent] hint | remember to remove 'stop' file before next run\n");
     
     return EXIT_SUCCESS;
 }
