@@ -159,10 +159,10 @@ void monitor_file(const char* t_filepath, int pipe_fd, int logger_fd) {
 
     // print initial file information
     //print_file_info(t_filepath, &last_size);
-    
-    // redirect stdout to logger pipe
-    dup2(logger_fd, STDOUT_FILENO);
-    close(logger_fd);
+
+    // redirect stdout to logger pipe; testing purposes - FOR NOW JUST TO TEST THE PIPE IS WORKING
+    //dup2(logger_fd, STDOUT_FILENO);
+    //close(logger_fd);
     
     // get initial file size
     struct stat file_stat;
@@ -170,10 +170,18 @@ void monitor_file(const char* t_filepath, int pipe_fd, int logger_fd) {
         last_size = file_stat.st_size;
     }
     
+    // print to console
     //printf("[child %d] info | waiting for check commands...\n", pid);
     printf("[child %d] info | monitoring file '%s' (initial size: %ld bytes)\n", 
            pid, t_filepath, last_size);
     fflush(stdout);
+    
+    // also send to logger
+    char log_msg[512];
+    snprintf(log_msg, sizeof(log_msg), 
+             "[child %d] info | monitoring file '%s' (initial size: %ld bytes)\n", 
+             pid, t_filepath, last_size);
+    write(logger_fd, log_msg, strlen(log_msg));
     
     char buffer[256];
     
@@ -185,6 +193,10 @@ void monitor_file(const char* t_filepath, int pipe_fd, int logger_fd) {
             // pipe closed or error
             printf("[child %d] info | pipe closed, exiting...\n", pid);
             fflush(stdout);
+            
+            char log_msg[256];
+            snprintf(log_msg, sizeof(log_msg), "[child %d] info | pipe closed, exiting...\n", pid);
+            write(logger_fd, log_msg, strlen(log_msg));
             break;
         }
         
@@ -201,8 +213,10 @@ void monitor_file(const char* t_filepath, int pipe_fd, int logger_fd) {
             
             // check if file has grown
             if (file_stat.st_size > last_size) {
+                // print to console
                 printf("[child %d] info | file '%s' has grown from %ld to %ld bytes\n",
                     pid, t_filepath, last_size, file_stat.st_size);
+                fflush(stdout);
                 
                 // read and display new content
                 FILE* fp = fopen(t_filepath, "r");
@@ -223,14 +237,45 @@ void monitor_file(const char* t_filepath, int pipe_fd, int logger_fd) {
                 
                 // print updated file information
                 print_file_info(t_filepath, &last_size);
+                
+                // send header to logger
+                char log_buffer[2048];
+                int offset = 0;
+                
+                // format header for logger
+                struct tm* timeinfo = localtime(&file_stat.st_mtime);
+                char time_str[80];
+                asctime_r(timeinfo, time_str);
+                time_str[strcspn(time_str, "\n")] = 0;
+                
+                offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset,
+                    "\n[child %d] === '%s' change detected ================\n", pid, t_filepath);
+                offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset,
+                    "[child %d] file. . . . . . : %s\n", pid, t_filepath);
+                offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset,
+                    "[child %d] process ID . . . : %d\n", pid, pid);
+                offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset,
+                    "[child %d] old size. . . . : %ld bytes\n", pid, last_size);
+                offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset,
+                    "[child %d] new size. . . . : %ld bytes\n", pid, file_stat.st_size);
+                offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset,
+                    "[child %d] last modified. . : %s\n", pid, time_str);
+                offset += snprintf(log_buffer + offset, sizeof(log_buffer) - offset,
+                    "[child %d] ================================================\n\n", pid);
+                
+                write(logger_fd, log_buffer, offset);
+                
+                // update last size
+                last_size = file_stat.st_size;
             } else {
                 printf("[child %d] info | no changes in file '%s'\n", pid, t_filepath);
+                fflush(stdout);
             }
-            fflush(stdout);
         }
     }
     
     close(pipe_fd);
+    close(logger_fd);
 }
 
 int main(int argc, char** argv) {
