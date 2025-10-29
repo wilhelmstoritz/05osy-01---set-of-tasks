@@ -1,4 +1,4 @@
-TARGET1=main
+TARGET1=testik
 
 all: $(TARGET1)
 
