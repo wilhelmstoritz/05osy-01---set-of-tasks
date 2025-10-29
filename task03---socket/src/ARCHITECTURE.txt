@@ -1,0 +1,139 @@
+```
+SOCKET IMAGE PROCESSING SERVER - ARCHITECTURE DIAGRAM
+======================================================
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              SERVER SIDE                                    │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Main Server Process (Parent)
+┌──────────────────────────┐
+│  Listen on Port          │
+│  - socket()              │
+│  - bind()                │
+│  - listen()              │
+│  - poll() for stdin      │
+│    and new connections   │
+└──────────┬───────────────┘
+           │
+           │ New client connects
+           ├─ accept() → fork()
+           │
+           ├──────────────────────┐
+           │                      │
+           ▼                      ▼
+    ┌─────────────┐        ┌─────────────┐
+    │  Client 1   │        │  Client 2   │  ... (many clients)
+    │   Handler   │        │   Handler   │
+    └──────┬──────┘        └──────┬──────┘
+           │                      │
+           │ 1. Read resolution   │
+           │    "1500x750\n"      │
+           │                      │
+           │ 2. Create pipe       │
+           │    and fork() twice  │
+           │                      │
+           ├──────────┬───────────┤
+           │          │           │
+           ▼          ▼           ▼
+    ┌──────────┐  ┌─────┐  ┌──────────┐
+    │ Convert  │→→│Pipe │→→│   XZ     │
+    │          │  └─────┘  │          │
+    │ convert  │           │ xz -     │
+    │ -resize  │           │ --stdout │
+    │ 1500x750!│           │          │
+    │ podzim   │           │          │
+    │ .png -   │           │          │
+    │          │           │          │
+    │ stdout→  │           │ stdout→  │
+    │  pipe    │           │  socket  │
+    └──────────┘           └────┬─────┘
+                                │
+                                │ Compressed
+                                │ image data
+                                ▼
+                           ┌─────────┐
+                           │ Network │
+                           └────┬────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              CLIENT SIDE                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+                           ┌─────────┐
+                           │ Network │
+                           └────┬────┘
+                                │ Compressed
+                                │ image data
+                                ▼
+                        ┌───────────────┐
+                        │ Client Main   │
+                        │               │
+                        │ 1. Connect    │
+                        │ 2. Send       │
+                        │    "1500x750" │
+                        │ 3. Receive    │
+                        │    data       │
+                        │ 4. Save to    │
+                        │    image.img  │
+                        └───────┬───────┘
+                                │
+                                │ After save complete
+                                │ Create pipe and
+                                │ fork() twice
+                                │
+                        ┌───────┴────────┐
+                        │                │
+                        ▼                ▼
+                 ┌──────────┐      ┌─────────┐
+                 │    XZ    │      │ Display │
+                 │  decomp  │→→→→→→│         │
+                 │          │pipe  │         │
+                 │ xz -d    │      │ display │
+                 │ image.img│      │    -    │
+                 │ --stdout │      │         │
+                 │          │      │ stdin←  │
+                 │ stdout→  │      │  pipe   │
+                 │  pipe    │      │         │
+                 └──────────┘      └────┬────┘
+                                        │
+                                        ▼
+                                  ┌──────────┐
+                                  │  X11     │
+                                  │  Window  │
+                                  │  with    │
+                                  │  Image   │
+                                  └──────────┘
+
+LEGEND:
+───────
+│   Process boundary
+→   Data flow
+→→  Pipe connection
+▼   Control flow
+
+
+PROCESS LIFECYCLE:
+──────────────────
+
+SERVER:
+1. Main process: listen() → accept() → fork() → (repeat)
+2. Child process: read resolution → fork() twice → wait() → exit()
+3. Convert grandchild: exec convert → outputs to pipe → exit()
+4. XZ grandchild: reads from pipe → exec xz → outputs to socket → exit()
+
+CLIENT:
+1. Main process: connect() → send resolution → receive data → save file
+2. Main process: fork() twice → wait for both
+3. XZ child: exec xz -d → outputs to pipe → exit()
+4. Display child: reads from pipe → exec display → exit when window closes
+
+IMPORTANT NOTES:
+────────────────
+- Parent server ONLY accepts connections, never communicates with clients
+- Each client gets dedicated child process - true parallelism
+- All pipes are anonymous (created with pipe())
+- File descriptors properly closed in each process
+- Parents wait for children (no zombies)
+- No temporary files - all data flows through pipes
+```

@@ -27,6 +27,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
+#include <sys/wait.h>
 
 #define STR_CLOSE               "close"
 
@@ -79,10 +80,11 @@ void help( int t_narg, char **t_args )
             "\n"
             "  Socket client example.\n"
             "\n"
-            "  Use: %s [-h -d] ip_or_name port_number\n"
+            "  Use: %s [-h -d] ip_or_name port_number resolution\n"
             "\n"
             "    -d  debug mode \n"
             "    -h  this help\n"
+            "    resolution format: WIDTHxHEIGHT (e.g., 1500x750)\n"
             "\n", t_args[ 0 ] );
 
         exit( 0 );
@@ -97,10 +99,11 @@ void help( int t_narg, char **t_args )
 int main( int t_narg, char **t_args )
 {
 
-    if ( t_narg <= 2 ) help( t_narg, t_args );
+    if ( t_narg <= 3 ) help( t_narg, t_args );
 
     int l_port = 0;
     char *l_host = nullptr;
+    char *l_resolution = nullptr;
 
     // parsing arguments
     for ( int i = 1; i < t_narg; i++ )
@@ -117,12 +120,14 @@ int main( int t_narg, char **t_args )
                 l_host = t_args[ i ];
             else if ( !l_port )
                 l_port = atoi( t_args[ i ] );
+            else if ( !l_resolution )
+                l_resolution = t_args[ i ];
         }
     }
 
-    if ( !l_host || !l_port )
+    if ( !l_host || !l_port || !l_resolution )
     {
-        log_msg( LOG_INFO, "Host or port is missing!" );
+        log_msg( LOG_INFO, "Host, port or resolution is missing!" );
         help( t_narg, t_args );
         exit( 1 );
     }
@@ -170,90 +175,132 @@ int main( int t_narg, char **t_args )
     log_msg( LOG_INFO, "Server IP: '%s'  port: %d",
              inet_ntoa( l_cl_addr.sin_addr ), ntohs( l_cl_addr.sin_port ) );
 
-    log_msg( LOG_INFO, "Enter 'close' to close application." );
-
-    // list of fd sources
-    pollfd l_read_poll[ 2 ];
-
-    l_read_poll[ 0 ].fd = STDIN_FILENO;
-    l_read_poll[ 0 ].events = POLLIN;
-    l_read_poll[ 1 ].fd = l_sock_server;
-    l_read_poll[ 1 ].events = POLLIN;
-
-    // go!
-    while ( 1 )
+    // Send resolution request to server
+    char l_resolution_msg[ 128 ];
+    snprintf( l_resolution_msg, sizeof( l_resolution_msg ), "%s\n", l_resolution );
+    int l_len = write( l_sock_server, l_resolution_msg, strlen( l_resolution_msg ) );
+    if ( l_len < 0 )
     {
-        char l_buf[ 128 ];
+        log_msg( LOG_ERROR, "Unable to send resolution to server." );
+        close( l_sock_server );
+        exit( 1 );
+    }
+    log_msg( LOG_INFO, "Sent resolution request: %s", l_resolution );
 
-        // select from fds
-        if ( poll( l_read_poll, 2, -1 ) < 0 ) break;
-
-        // data on stdin?
-        if ( l_read_poll[ 0 ].revents & POLLIN )
-        {
-            //  read from stdin
-            int l_len = read( STDIN_FILENO, l_buf, sizeof( l_buf ) );
-            if ( l_len == 0 )
-            {
-                log_msg( LOG_DEBUG, "Stdin closed." );
-                break;
-            }
-            if ( l_len < 0 )
-            {
-                log_msg( LOG_ERROR, "Unable to read from stdin." );
-                break;
-            }
-            else
-                log_msg( LOG_DEBUG, "Read %d bytes from stdin.", l_len );
-
-            // send data to server
-            l_len = write( l_sock_server, l_buf, l_len );
-            if ( l_len < 0 )
-            {
-                log_msg( LOG_ERROR, "Unable to send data to server." );
-                break;
-            }
-            else
-                log_msg( LOG_DEBUG, "Sent %d bytes to server.", l_len );
-        }
-
-        // data from server?
-        if ( l_read_poll[ 1 ].revents & POLLIN )
-        {
-            // read data from server
-            int l_len = read( l_sock_server, l_buf, sizeof( l_buf ) );
-            if ( l_len == 0 )
-            {
-                log_msg( LOG_DEBUG, "Server closed socket." );
-                break;
-            }
-            else if ( l_len < 0 )
-            {
-                log_msg( LOG_ERROR, "Unable to read data from server." );
-                break;
-            }
-            else
-                log_msg( LOG_DEBUG, "Read %d bytes from server.", l_len );
-
-            // display on stdout
-            l_len = write( STDOUT_FILENO, l_buf, l_len );
-            if ( l_len < 0 )
-            {
-                log_msg( LOG_ERROR, "Unable to write to stdout." );
-                break;
-            }
-
-            // request to close?
-            if ( !strncasecmp( l_buf, STR_CLOSE, strlen( STR_CLOSE ) ) )
-            {
-                log_msg( LOG_INFO, "Connection will be closed..." );
-                break;
-            }
-        }
+    // Open file for writing received data
+    int l_fd = open( "image.img", O_WRONLY | O_CREAT | O_TRUNC, 0644 );
+    if ( l_fd < 0 )
+    {
+        log_msg( LOG_ERROR, "Unable to create image.img file." );
+        close( l_sock_server );
+        exit( 1 );
     }
 
-    // close socket
+    // Receive data from server and write to file
+    char l_buf[ 4096 ];
+    int l_total_bytes = 0;
+    
+    while ( 1 )
+    {
+        l_len = read( l_sock_server, l_buf, sizeof( l_buf ) );
+        if ( l_len == 0 )
+        {
+            log_msg( LOG_INFO, "Server closed connection. Transfer complete." );
+            break;
+        }
+        else if ( l_len < 0 )
+        {
+            log_msg( LOG_ERROR, "Unable to read data from server." );
+            close( l_fd );
+            close( l_sock_server );
+            exit( 1 );
+        }
+        
+        // Write to file
+        int l_written = write( l_fd, l_buf, l_len );
+        if ( l_written < 0 )
+        {
+            log_msg( LOG_ERROR, "Unable to write to file." );
+            close( l_fd );
+            close( l_sock_server );
+            exit( 1 );
+        }
+        
+        l_total_bytes += l_len;
+        log_msg( LOG_DEBUG, "Received %d bytes (total: %d)", l_len, l_total_bytes );
+    }
+
+    close( l_fd );
     close( l_sock_server );
+    
+    log_msg( LOG_INFO, "Received %d bytes total. Saved to image.img", l_total_bytes );
+
+    // Now decompress and display the image using xz -d | display
+    log_msg( LOG_INFO, "Decompressing and displaying image..." );
+    
+    // Create pipe for xz -> display
+    int l_pipe_fd[ 2 ];
+    if ( pipe( l_pipe_fd ) < 0 )
+    {
+        log_msg( LOG_ERROR, "Pipe creation failed." );
+        exit( 1 );
+    }
+    
+    // Fork for xz process
+    pid_t l_pid_xz = fork();
+    if ( l_pid_xz < 0 )
+    {
+        log_msg( LOG_ERROR, "Fork failed for xz process." );
+        exit( 1 );
+    }
+    
+    if ( l_pid_xz == 0 )
+    {
+        // Child process - xz decompression
+        close( l_pipe_fd[ 0 ] ); // Close read end
+        
+        // Redirect stdout to pipe
+        dup2( l_pipe_fd[ 1 ], STDOUT_FILENO );
+        close( l_pipe_fd[ 1 ] );
+        
+        // Execute xz -d
+        execlp( "xz", "xz", "-d", "image.img", "--stdout", nullptr );
+        log_msg( LOG_ERROR, "Exec xz failed." );
+        exit( 1 );
+    }
+    
+    // Fork for display process
+    pid_t l_pid_display = fork();
+    if ( l_pid_display < 0 )
+    {
+        log_msg( LOG_ERROR, "Fork failed for display process." );
+        exit( 1 );
+    }
+    
+    if ( l_pid_display == 0 )
+    {
+        // Child process - display
+        close( l_pipe_fd[ 1 ] ); // Close write end
+        
+        // Redirect stdin from pipe
+        dup2( l_pipe_fd[ 0 ], STDIN_FILENO );
+        close( l_pipe_fd[ 0 ] );
+        
+        // Execute display
+        execlp( "display", "display", "-", nullptr );
+        log_msg( LOG_ERROR, "Exec display failed." );
+        exit( 1 );
+    }
+    
+    // Parent closes pipe and waits for both children
+    close( l_pipe_fd[ 0 ] );
+    close( l_pipe_fd[ 1 ] );
+    
+    int l_status;
+    waitpid( l_pid_xz, &l_status, 0 );
+    waitpid( l_pid_display, &l_status, 0 );
+    
+    log_msg( LOG_INFO, "Image display completed." );
 
     return 0;
   }

@@ -26,6 +26,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <sys/wait.h>
 
 #define STR_CLOSE   "close"
 #define STR_QUIT    "quit"
@@ -90,6 +91,107 @@ void help( int t_narg, char **t_args )
 
     if ( !strcmp( t_args[ 1 ], "-d" ) )
         g_debug = LOG_DEBUG;
+}
+
+//***************************************************************************
+// Handle client communication in child process
+
+void handle_client( int t_client_socket )
+{
+    char l_buf[ 256 ];
+    
+    // Read resolution request from client
+    int l_len = read( t_client_socket, l_buf, sizeof( l_buf ) - 1 );
+    if ( l_len <= 0 )
+    {
+        log_msg( LOG_ERROR, "Unable to read resolution from client." );
+        close( t_client_socket );
+        exit( 1 );
+    }
+    
+    l_buf[ l_len ] = 0; // null terminate
+    
+    // Remove newline if present
+    char *newline = strchr( l_buf, '\n' );
+    if ( newline ) *newline = 0;
+    
+    log_msg( LOG_INFO, "Client requested resolution: %s", l_buf );
+    
+    // Create child process for image conversion with compression
+    pid_t l_pid_convert = fork();
+    if ( l_pid_convert < 0 )
+    {
+        log_msg( LOG_ERROR, "Fork failed for convert process." );
+        close( t_client_socket );
+        exit( 1 );
+    }
+    
+    if ( l_pid_convert == 0 )
+    {
+        // Child process for convert | xz pipeline
+        
+        // Create pipe for convert -> xz
+        int l_pipe_fd[ 2 ];
+        if ( pipe( l_pipe_fd ) < 0 )
+        {
+            log_msg( LOG_ERROR, "Pipe creation failed." );
+            exit( 1 );
+        }
+        
+        // Fork for convert process
+        pid_t l_pid_xz = fork();
+        if ( l_pid_xz < 0 )
+        {
+            log_msg( LOG_ERROR, "Fork failed for xz process." );
+            exit( 1 );
+        }
+        
+        if ( l_pid_xz == 0 )
+        {
+            // Child process - xz compression
+            close( l_pipe_fd[ 1 ] ); // Close write end
+            
+            // Redirect stdin from pipe
+            dup2( l_pipe_fd[ 0 ], STDIN_FILENO );
+            close( l_pipe_fd[ 0 ] );
+            
+            // Redirect stdout to socket
+            dup2( t_client_socket, STDOUT_FILENO );
+            close( t_client_socket );
+            
+            // Execute xz
+            execlp( "xz", "xz", "-", "--stdout", nullptr );
+            log_msg( LOG_ERROR, "Exec xz failed." );
+            exit( 1 );
+        }
+        else
+        {
+            // Parent of xz - convert process
+            close( l_pipe_fd[ 0 ] ); // Close read end
+            
+            // Redirect stdout to pipe
+            dup2( l_pipe_fd[ 1 ], STDOUT_FILENO );
+            close( l_pipe_fd[ 1 ] );
+            close( t_client_socket );
+            
+            // Build convert command with resolution
+            char l_resize_arg[ 64 ];
+            snprintf( l_resize_arg, sizeof( l_resize_arg ), "%s!", l_buf );
+            
+            // Execute convert
+            execlp( "convert", "convert", "-resize", l_resize_arg, "podzim.png", "-", nullptr );
+            log_msg( LOG_ERROR, "Exec convert failed." );
+            exit( 1 );
+        }
+    }
+    
+    // Parent waits for conversion process to finish
+    int l_status;
+    waitpid( l_pid_convert, &l_status, 0 );
+    
+    close( t_client_socket );
+    log_msg( LOG_INFO, "Client connection closed." );
+    exit( 0 );
 }
 
 //***************************************************************************
@@ -164,7 +266,12 @@ int main( int t_narg, char **t_args )
     // go!
     while ( 1 )
     {
-        int l_sock_client = -1;
+        // Check for terminated child processes
+        int l_status;
+        while ( waitpid( -1, &l_status, WNOHANG ) > 0 )
+        {
+            log_msg( LOG_DEBUG, "Child process terminated." );
+        }
 
         // list of fd sources
         pollfd l_read_poll[ 2 ];
@@ -174,160 +281,87 @@ int main( int t_narg, char **t_args )
         l_read_poll[ 1 ].fd = l_sock_listen;
         l_read_poll[ 1 ].events = POLLIN;
 
-        while ( 1 ) // wait for new client
+        // select from fds
+        int l_poll = poll( l_read_poll, 2, -1 );
+
+        if ( l_poll < 0 )
         {
-            // select from fds
-            int l_poll = poll( l_read_poll, 2, -1 );
+            log_msg( LOG_ERROR, "Function poll failed!" );
+            exit( 1 );
+        }
 
-            if ( l_poll < 0 )
+        if ( l_read_poll[ 0 ].revents & POLLIN )
+        { // data on stdin
+            char buf[ 128 ];
+            
+            int l_len = read( STDIN_FILENO, buf, sizeof( buf) );
+            if ( l_len == 0 )
             {
-                log_msg( LOG_ERROR, "Function poll failed!" );
-                exit( 1 );
-            }
-
-            if ( l_read_poll[ 0 ].revents & POLLIN )
-            { // data on stdin
-                char buf[ 128 ];
-                
-                int l_len = read( STDIN_FILENO, buf, sizeof( buf) );
-                if ( l_len == 0 )
-                {
-                    log_msg( LOG_DEBUG, "Stdin closed." );
-                    exit( 0 );
-                }
-                if ( l_len < 0 )
-                {
-                    log_msg( LOG_DEBUG, "Unable to read from stdin!" );
-                    exit( 1 );
-                }
-
-                log_msg( LOG_DEBUG, "Read %d bytes from stdin", l_len );
-                // request to quit?
-                if ( !strncmp( buf, STR_QUIT, strlen( STR_QUIT ) ) )
-                {
-                    log_msg( LOG_INFO, "Request to 'quit' entered.");
-                    close( l_sock_listen );
-                    exit( 0 );
-                }
-            }
-
-            if ( l_read_poll[ 1 ].revents & POLLIN )
-            { // new client?
-                sockaddr_in l_rsa;
-                int l_rsa_size = sizeof( l_rsa );
-                // new connection
-                l_sock_client = accept( l_sock_listen, ( sockaddr * ) &l_rsa, ( socklen_t * ) &l_rsa_size );
-                if ( l_sock_client == -1 )
-                {
-                    log_msg( LOG_ERROR, "Unable to accept new client." );
-                    close( l_sock_listen );
-                    exit( 1 );
-                }
-                uint l_lsa = sizeof( l_srv_addr );
-                // my IP
-                getsockname( l_sock_client, ( sockaddr * ) &l_srv_addr, &l_lsa );
-                log_msg( LOG_INFO, "My IP: '%s'  port: %d",
-                                 inet_ntoa( l_srv_addr.sin_addr ), ntohs( l_srv_addr.sin_port ) );
-                // client IP
-                getpeername( l_sock_client, ( sockaddr * ) &l_srv_addr, &l_lsa );
-                log_msg( LOG_INFO, "Client IP: '%s'  port: %d",
-                                 inet_ntoa( l_srv_addr.sin_addr ), ntohs( l_srv_addr.sin_port ) );
-
-                break;
-            }
-
-        } // while wait for client
-
-        // change source from sock_listen to sock_client
-        l_read_poll[ 1 ].fd = l_sock_client;
-
-        while ( 1  )
-        { // communication
-            char l_buf[ 256 ];
-
-            // select from fds
-            int l_poll = poll( l_read_poll, 2, -1 );
-
-            if ( l_poll < 0 )
-            {
-                log_msg( LOG_ERROR, "Function poll failed!" );
-                exit( 1 );
-            }
-
-            // data on stdin?
-            if ( l_read_poll[ 0 ].revents & POLLIN )
-            {
-                // read data from stdin
-                int l_len = read( STDIN_FILENO, l_buf, sizeof( l_buf ) );
-                if ( l_len == 0 )
-                {
-                    log_msg( LOG_DEBUG, "Stdin closed." );
-                    exit( 0 );
-                }
-                if ( l_len < 0 )
-                {
-                    log_msg( LOG_ERROR, "Unable to read data from stdin." );
-                    exit( 1 );
-                }
-                else
-                    log_msg( LOG_DEBUG, "Read %d bytes from stdin.", l_len );
-
-                // send data to client
-                l_len = write( l_sock_client, l_buf, l_len );
-                if ( l_len < 0 )
-                {
-                    log_msg( LOG_ERROR, "Unable to send data to client." );
-                    exit( 1 );
-                }
-                else
-                    log_msg( LOG_DEBUG, "Sent %d bytes to client.", l_len );
-            }
-            // data from client?
-            if ( l_read_poll[ 1 ].revents & POLLIN )
-            {
-                // read data from socket
-                int l_len = read( l_sock_client, l_buf, sizeof( l_buf ) );
-                if ( l_len == 0 )
-                {
-                    log_msg( LOG_DEBUG, "Client closed socket!" );
-                    close( l_sock_client );
-                    break;
-                }
-                else if ( l_len < 0 )
-                {
-                    log_msg( LOG_ERROR, "Unable to read data from client." );
-                    close( l_sock_client );
-                    break;
-                }
-                else
-                    log_msg( LOG_DEBUG, "Read %d bytes from client.", l_len );
-
-                // write data to client
-                l_len = write( STDOUT_FILENO, l_buf, l_len );
-                if ( l_len < 0 )
-                {
-                    log_msg( LOG_ERROR, "Unable to write data to stdout." );
-                    exit( 1 );
-                }
-
-                // close request?
-                if ( !strncasecmp( l_buf, "close", strlen( STR_CLOSE ) ) )
-                {
-                    log_msg( LOG_INFO, "Client sent 'close' request to close connection." );
-                    close( l_sock_client );
-                    log_msg( LOG_INFO, "Connection closed. Waiting for new client." );
-                    break;
-                }
-            }
-            // request for quit
-            if ( !strncasecmp( l_buf, "quit", strlen( STR_QUIT ) ) )
-            {
-                close( l_sock_listen );
-                close( l_sock_client );
-                log_msg( LOG_INFO, "Request to 'quit' entered" );
+                log_msg( LOG_DEBUG, "Stdin closed." );
                 exit( 0 );
-                }
-        } // while communication
+            }
+            if ( l_len < 0 )
+            {
+                log_msg( LOG_DEBUG, "Unable to read from stdin!" );
+                exit( 1 );
+            }
+
+            log_msg( LOG_DEBUG, "Read %d bytes from stdin", l_len );
+            // request to quit?
+            if ( !strncmp( buf, STR_QUIT, strlen( STR_QUIT ) ) )
+            {
+                log_msg( LOG_INFO, "Request to 'quit' entered.");
+                close( l_sock_listen );
+                exit( 0 );
+            }
+        }
+
+        if ( l_read_poll[ 1 ].revents & POLLIN )
+        { // new client connection
+            sockaddr_in l_rsa;
+            int l_rsa_size = sizeof( l_rsa );
+            
+            // Accept new connection
+            int l_sock_client = accept( l_sock_listen, ( sockaddr * ) &l_rsa, ( socklen_t * ) &l_rsa_size );
+            if ( l_sock_client == -1 )
+            {
+                log_msg( LOG_ERROR, "Unable to accept new client." );
+                continue;
+            }
+            
+            uint l_lsa = sizeof( l_srv_addr );
+            // my IP
+            getsockname( l_sock_client, ( sockaddr * ) &l_srv_addr, &l_lsa );
+            log_msg( LOG_INFO, "My IP: '%s'  port: %d",
+                             inet_ntoa( l_srv_addr.sin_addr ), ntohs( l_srv_addr.sin_port ) );
+            // client IP
+            getpeername( l_sock_client, ( sockaddr * ) &l_srv_addr, &l_lsa );
+            log_msg( LOG_INFO, "Client IP: '%s'  port: %d",
+                             inet_ntoa( l_srv_addr.sin_addr ), ntohs( l_srv_addr.sin_port ) );
+
+            // Fork to handle client
+            pid_t l_pid = fork();
+            if ( l_pid < 0 )
+            {
+                log_msg( LOG_ERROR, "Fork failed for client handler." );
+                close( l_sock_client );
+                continue;
+            }
+            
+            if ( l_pid == 0 )
+            {
+                // Child process - handle client
+                close( l_sock_listen ); // Child doesn't need listening socket
+                handle_client( l_sock_client );
+                // handle_client will exit
+            }
+            else
+            {
+                // Parent process
+                close( l_sock_client ); // Parent doesn't need client socket
+                log_msg( LOG_INFO, "Created child process %d for client.", l_pid );
+            }
+        }
     } // while ( 1 )
 
     return 0;
