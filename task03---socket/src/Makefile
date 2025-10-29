@@ -1,10 +1,31 @@
-TARGET1=task
+##############################################################################
+#
+# Simple Makefile example
+#
+# This Makefile will initiate compilation of all *.cpp files 
+# in current directory into individual executables. 
+#
+##############################################################################
 
-all: $(TARGET1)
+# Sources *.cpp can be changed to list of individual files
+SOURCES=$(wildcard *.cpp)
+OBJS=$(SOURCES:%.cpp=%.o)
+TARGETS=$(SOURCES:%.cpp=%)
 
-$(TARGET1): $(TARGET1).cpp
-	g++ -std=c++11 $^ -o $@
+CPPFLAGS += -g -pthread -std=c++11 -Wall 
+LDFLAGS += -pthread
+LDLIBS += -lrt
+
+.PHONY: all clean 
+
+all: $(TARGETS)
+
+%.o: %.cpp
+	g++ -c $(CPPFLAGS) $^ -o $@
+	
+$(TARGETS): %: %.o
+	g++ $(LDFLAGS) $^ $(LDLIBS) -o $@ 
 
 clean:
-	rm -f $(TARGET1)
-	rm -f stop
+	rm -rf *.o $(TARGETS)
+
