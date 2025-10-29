@@ -4,7 +4,7 @@
 
 cat << 'EOF'
 ╔═══════════════════════════════════════════════════════════════╗
-║     Image Processing Socket Server - Usage Examples          ║
+║     Image Processing Socket Server - Usage Examples           ║
 ╚═══════════════════════════════════════════════════════════════╝
 
 PREREQUISITES:
