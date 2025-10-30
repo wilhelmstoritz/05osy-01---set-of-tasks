@@ -175,7 +175,7 @@ void handle_client( int t_client_socket )
             close( t_client_socket );
             
             // Build convert command with resolution
-            char l_resize_arg[ 64 ];
+            char l_resize_arg[ 257 ];
             snprintf( l_resize_arg, sizeof( l_resize_arg ), "%s!", l_buf );
             
             // Execute convert
