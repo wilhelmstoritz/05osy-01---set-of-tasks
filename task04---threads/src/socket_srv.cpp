@@ -5,6 +5,8 @@
 
 //#include "bits/stdc++.h"
 #include <iostream>
+#include <sstream>
+#include <iomanip>
 #include <pthread.h>
 #include <semaphore.h>
 #include <string>
@@ -247,14 +249,14 @@ int main(int t_argc, char** t_argv) {
     // create listening socket
     int l_listen_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (l_listen_socket < 0) {
-        perror("socket");
+        std::cerr << "socket error: " << strerror(errno) << std::endl;
         return EXIT_FAILURE;
     }
     
     // enable port reuse
     int l_opt = 1;
     if (setsockopt(l_listen_socket, SOL_SOCKET, SO_REUSEADDR, &l_opt, sizeof(l_opt)) < 0) {
-        perror("setsockopt");
+        std::cerr << "setsockopt error: " << strerror(errno) << std::endl;
     }
     
     // bind to port
@@ -265,14 +267,14 @@ int main(int t_argc, char** t_argv) {
     l_srv_addr.sin_port = htons(l_port);
     
     if (bind(l_listen_socket, (sockaddr*)&l_srv_addr, sizeof(l_srv_addr)) < 0) {
-        perror("bind");
+        std::cerr << "bind error: " << strerror(errno) << std::endl;
         close(l_listen_socket);
         return EXIT_FAILURE;
     }
     
     // listen for connections
     if (listen(l_listen_socket, 5) < 0) {
-        perror("listen");
+        std::cerr << "listen error: " << strerror(errno) << std::endl;
         close(l_listen_socket);
         return EXIT_FAILURE;
     }
@@ -287,7 +289,7 @@ int main(int t_argc, char** t_argv) {
         
         int l_ret = poll(l_polls, 2, -1);
         if (l_ret < 0) {
-            perror("poll");
+            std::cerr << "poll error: " << strerror(errno) << std::endl;
             break;
         }
         
@@ -311,7 +313,7 @@ int main(int t_argc, char** t_argv) {
             
             int l_client_socket = accept(l_listen_socket, (sockaddr*)&l_client_addr, &l_client_len);
             if (l_client_socket < 0) {
-                perror("accept");
+                std::cerr << "accept error: " << strerror(errno) << std::endl;
                 continue;
             }
             
@@ -327,7 +329,7 @@ int main(int t_argc, char** t_argv) {
             
             pthread_t l_thread;
             if (pthread_create(&l_thread, nullptr, client_thread, l_data) != 0) {
-                perror("pthread_create");
+                std::cerr << "pthread_create error: " << strerror(errno) << std::endl;
                 close(l_client_socket);
                 delete l_data;
             }

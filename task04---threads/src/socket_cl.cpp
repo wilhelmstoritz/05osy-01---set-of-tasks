@@ -25,6 +25,8 @@
 #include <string>
 #include <fstream>
 #include <iostream>
+#include <sstream>
+#include <iomanip>
 
 // --- configuration -----------------------------------------------------------
 #define NAMES_FILE              "jmena.txt"
@@ -38,26 +40,24 @@
 int g_debug = LOG_INFO;
 
 void log_msg(int t_log_level, const char *t_form, ...) {
-    const char *out_fmt[] = {
-            "ERR: (%d-%s) %s\n",
-            "INF: %s\n",
-            "DEB: %s\n" };
-
     if (t_log_level && t_log_level > g_debug) return;
 
     char l_buf[1024];
     va_list l_arg;
     va_start(l_arg, t_form);
-    vsprintf(l_buf, t_form, l_arg);
+    vsnprintf(l_buf, sizeof(l_buf), t_form, l_arg);
     va_end(l_arg);
 
     switch (t_log_level) {
     case LOG_INFO:
+        std::cout << "INF: " << l_buf << std::endl;
+        break;
     case LOG_DEBUG:
-        fprintf(stdout, out_fmt[t_log_level], l_buf);
+        std::cout << "DEB: " << l_buf << std::endl;
         break;
     case LOG_ERROR:
-        fprintf(stderr, out_fmt[t_log_level], errno, strerror(errno), l_buf);
+        std::cerr << "ERR: (" << errno << "-" << strerror(errno) << ") " 
+                  << l_buf << std::endl;
         break;
     }
 }
@@ -219,17 +219,16 @@ void* stdin_reader_thread(void* t_arg) {
 // --- help --------------------------------------------------------------------
 void help(int t_narg, char **t_args) {
     if (t_narg <= 1 || !strcmp(t_args[1], "-h")) {
-        printf(
-            "\n"
-            "  socket client for producer-consumer\n"
-            "\n"
-            "  usage: %s [-h -d] ip_or_name port_number\n"
-            "\n"
-            "    -d  debug mode \n"
-            "    -h  this help\n"
-            "\n"
-            "  server will ask 'Task?' - client responds 'producer' or 'consumer'\n"
-            "\n", t_args[0]);
+        std::cout << "\n"
+                  << "  socket client for producer-consumer\n"
+                  << "\n"
+                  << "  usage: " << t_args[0] << " [-h -d] ip_or_name port_number\n"
+                  << "\n"
+                  << "    -d  debug mode \n"
+                  << "    -h  this help\n"
+                  << "\n"
+                  << "  server will ask 'Task?' - client responds 'producer' or 'consumer'\n"
+                  << "\n";
 
         exit(EXIT_SUCCESS);
     }
@@ -306,8 +305,7 @@ int main(int t_narg, char **t_args) {
     log_msg(LOG_INFO, "server asks: %s", l_task_prompt.c_str());
 
     // ask user for role
-    printf("enter 'producer' or 'consumer': ");
-    fflush(stdout);
+    std::cout << "enter 'producer' or 'consumer': " << std::flush;
     
     char l_role[128];
     if (!fgets(l_role, sizeof(l_role), stdin)) {
