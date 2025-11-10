@@ -3,6 +3,7 @@
 // client can work as producer or consumer based on server's Task? prompt     //
 ////////////////////////////////////////////////////////////////////////////////
 
+//#include "bits/stdc++.h"
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -30,9 +31,9 @@
 #define DEFAULT_NAMES_PER_MIN   60
 
 // --- log messages ------------------------------------------------------------
-#define LOG_ERROR               0       // errors
-#define LOG_INFO                1       // information and notifications
-#define LOG_DEBUG               2       // debug messages
+#define LOG_ERROR               0   // errors
+#define LOG_INFO                1   // information and notifications
+#define LOG_DEBUG               2   // debug messages
 
 int g_debug = LOG_INFO;
 
@@ -68,118 +69,118 @@ std::atomic<bool> g_running(true);
 
 // --- helper functions --------------------------------------------------------
 // read line from socket
-bool read_line(int sock, std::string& line) {
-    char ch;
-    line.clear();
+bool read_line(int t_sock, std::string& t_line) {
+    char l_ch;
+    t_line.clear();
     while (true) {
-        int n = read(sock, &ch, 1);
-        if (n <= 0) return false;
-        if (ch == '\n') break;
-        line += ch;
+        int l_n = read(t_sock, &l_ch, 1);
+        if (l_n <= 0) return false;
+        if (l_ch == '\n') break;
+        t_line += l_ch;
     }
     return true;
 }
 
 // send line to socket
-bool send_line(int sock, const std::string& line) {
-    std::string msg = line + "\n";
-    int len = write(sock, msg.c_str(), msg.length());
-    return len == (int)msg.length();
+bool send_line(int t_sock, const std::string& t_line) {
+    std::string l_msg = t_line + "\n";
+    int l_len = write(t_sock, l_msg.c_str(), l_msg.length());
+    return l_len == (int)l_msg.length();
 }
 
 // load names from file
-std::vector<std::string> load_names(const char* filename) {
-    std::vector<std::string> names;
-    std::ifstream file(filename);
+std::vector<std::string> load_names(const char* t_filename) {
+    std::vector<std::string> l_names;
+    std::ifstream l_file(t_filename);
     
-    if (!file.is_open()) {
-        log_msg(LOG_ERROR, "unable to open file: %s", filename);
-        return names;
+    if (!l_file.is_open()) {
+        log_msg(LOG_ERROR, "unable to open file: %s", t_filename);
+        return l_names;
     }
     
-    std::string line;
-    while (std::getline(file, line)) {
-        if (!line.empty()) {
-            names.push_back(line);
+    std::string l_line;
+    while (std::getline(l_file, l_line)) {
+        if (!l_line.empty()) {
+            l_names.push_back(l_line);
         }
     }
     
-    file.close();
-    log_msg(LOG_INFO, "loaded %zu names from file.", names.size());
-    return names;
+    l_file.close();
+    log_msg(LOG_INFO, "loaded %zu names from file.", l_names.size());
+    return l_names;
 }
 
 // --- producer thread - sends names to server ---------------------------------
-void* producer_thread(void* arg) {
-    (void)arg;
+void* producer_thread(void* t_arg) {
+    (void)t_arg;
     
     log_msg(LOG_INFO, "producer thread started");
     
     // load names from file
-    std::vector<std::string> names = load_names(NAMES_FILE);
-    if (names.empty()) {
+    std::vector<std::string> l_names = load_names(NAMES_FILE);
+    if (l_names.empty()) {
         log_msg(LOG_ERROR, "no names loaded, producer thread exiting");
         g_running = false;
         return nullptr;
     }
     
-    size_t name_idx = 0;
+    size_t l_name_idx = 0;
     
     while (g_running) {
         // calculate sleep time based on names per minute
-        int names_per_min = g_names_per_minute.load();
-        int sleep_us = (60 * 1000000) / names_per_min;  // microseconds
+        int l_names_per_min = g_names_per_minute.load();
+        int l_sleep_us = (60 * 1000000) / l_names_per_min;  // microseconds
         
         // send name to server
-        std::string name = names[name_idx];
-        if (!send_line(g_socket, name)) {
+        std::string l_name = l_names[l_name_idx];
+        if (!send_line(g_socket, l_name)) {
             log_msg(LOG_ERROR, "failed to send name to server");
             g_running = false;
             break;
         }
         
-        log_msg(LOG_INFO, "sent: %s", name.c_str());
+        log_msg(LOG_INFO, "sent: %s", l_name.c_str());
         
         // wait for OK response
-        std::string response;
-        if (!read_line(g_socket, response)) {
+        std::string l_response;
+        if (!read_line(g_socket, l_response)) {
             log_msg(LOG_ERROR, "failed to read response from server");
             g_running = false;
             break;
         }
         
-        if (response != "OK") {
-            log_msg(LOG_INFO, "server response: %s", response.c_str());
+        if (l_response != "OK") {
+            log_msg(LOG_INFO, "server response: %s", l_response.c_str());
         }
         
         // move to next name (circular)
-        name_idx = (name_idx + 1) % names.size();
+        l_name_idx = (l_name_idx + 1) % l_names.size();
         
         // sleep
-        usleep(sleep_us);
+        usleep(l_sleep_us);
     }
     
     log_msg(LOG_INFO, "producer thread exiting");
     return nullptr;
 }
 
-// --- Consumer thread - receives names from server ----------------------------
-void* consumer_thread(void* arg) {
-    (void)arg;
+// --- consumer thread - receives names from server ----------------------------
+void* consumer_thread(void* t_arg) {
+    (void)t_arg;
     
     log_msg(LOG_INFO, "consumer thread started");
     
     while (g_running) {
         // read name from server
-        std::string name;
-        if (!read_line(g_socket, name)) {
+        std::string l_name;
+        if (!read_line(g_socket, l_name)) {
             log_msg(LOG_ERROR, "failed to read from server");
             g_running = false;
             break;
         }
         
         // display received name
-        log_msg(LOG_INFO, "received: %s", name.c_str());
+        log_msg(LOG_INFO, "received: %s", l_name.c_str());
         
         // send OK response
         if (!send_line(g_socket, "OK")) {
@@ -194,18 +195,18 @@ void* consumer_thread(void* arg) {
 }
 
 // --- stdin reader thread for producer - reads speed changes ------------------
-void* stdin_reader_thread(void* arg) {
-    (void)arg;
+void* stdin_reader_thread(void* t_arg) {
+    (void)t_arg;
     
     log_msg(LOG_INFO, "enter number to change names per minute (current: %d):", 
             g_names_per_minute.load());
     
-    char buffer[128];
-    while (g_running && fgets(buffer, sizeof(buffer), stdin)) {
-        int new_rate = atoi(buffer);
-        if (new_rate > 0 && new_rate <= 10000) {
-            g_names_per_minute = new_rate;
-            log_msg(LOG_INFO, "names per minute changed to: %d", new_rate);
+    char l_buffer[128];
+    while (g_running && fgets(l_buffer, sizeof(l_buffer), stdin)) {
+        int l_new_rate = atoi(l_buffer);
+        if (l_new_rate > 0 && l_new_rate <= 10000) {
+            g_names_per_minute = l_new_rate;
+            log_msg(LOG_INFO, "names per minute changed to: %d", l_new_rate);
         } else {
             log_msg(LOG_INFO, "invalid rate; current: %d names/min",
                     g_names_per_minute.load());
@@ -295,63 +296,63 @@ int main(int t_narg, char **t_args) {
     log_msg(LOG_INFO, "connected to server");
 
     // read Task? prompt from server
-    std::string task_prompt;
-    if (!read_line(g_socket, task_prompt)) {
+    std::string l_task_prompt;
+    if (!read_line(g_socket, l_task_prompt)) {
         log_msg(LOG_ERROR, "failed to read task prompt from server");
         close(g_socket);
         exit(EXIT_FAILURE);
     }
 
-    log_msg(LOG_INFO, "server asks: %s", task_prompt.c_str());
+    log_msg(LOG_INFO, "server asks: %s", l_task_prompt.c_str());
 
     // ask user for role
     printf("enter 'producer' or 'consumer': ");
     fflush(stdout);
     
-    char role[128];
-    if (!fgets(role, sizeof(role), stdin)) {
+    char l_role[128];
+    if (!fgets(l_role, sizeof(l_role), stdin)) {
         log_msg(LOG_ERROR, "failed to read role from stdin");
         close(g_socket);
         exit(EXIT_FAILURE);
     }
     
     // remove newline
-    role[strcspn(role, "\n")] = 0;
+    l_role[strcspn(l_role, "\n")] = 0;
 
     // Send role to server
-    if (!send_line(g_socket, role)) {
+    if (!send_line(g_socket, l_role)) {
         log_msg(LOG_ERROR, "failed to send role to server");
         close(g_socket);
         exit(EXIT_FAILURE);
     }
 
-    log_msg(LOG_INFO, "role selected: %s", role);
+    log_msg(LOG_INFO, "role selected: %s", l_role);
 
-    pthread_t worker_thread;
-    pthread_t stdin_thread;
+    pthread_t l_worker_thread;
+    pthread_t l_stdin_thread;
 
     // start appropriate thread based on role
-    if (!strcasecmp(role, "producer")) {
+    if (!strcasecmp(l_role, "producer")) {
         // start producer thread
-        pthread_create(&worker_thread, nullptr, producer_thread, nullptr);
+        pthread_create(&l_worker_thread, nullptr, producer_thread, nullptr);
         
         // start stdin reader for speed control
-        pthread_create(&stdin_thread, nullptr, stdin_reader_thread, nullptr);
+        pthread_create(&l_stdin_thread, nullptr, stdin_reader_thread, nullptr);
         
         // wait for threads
-        pthread_join(worker_thread, nullptr);
+        pthread_join(l_worker_thread, nullptr);
         g_running = false;
-        pthread_cancel(stdin_thread);
+        pthread_cancel(l_stdin_thread);
         
-    } else if (!strcasecmp(role, "consumer")) {
+    } else if (!strcasecmp(l_role, "consumer")) {
         // start consumer thread
-        pthread_create(&worker_thread, nullptr, consumer_thread, nullptr);
+        pthread_create(&l_worker_thread, nullptr, consumer_thread, nullptr);
         
         // wait for thread
-        pthread_join(worker_thread, nullptr);
+        pthread_join(l_worker_thread, nullptr);
         
     } else {
-        log_msg(LOG_ERROR, "invalid role: %s", role);
+        log_msg(LOG_ERROR, "invalid role: %s", l_role);
         close(g_socket);
         exit(EXIT_FAILURE);
     }

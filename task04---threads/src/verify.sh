@@ -59,9 +59,9 @@ fi
 # Test 5: Check for 3 semaphores in code
 echo ""
 echo "TEST 5: Kontrola 3 semaforů v kódu..."
-if grep -q "sem_t mutex_sem" interprocess-communication.cpp && \
-   grep -q "sem_t empty_sem" interprocess-communication.cpp && \
-   grep -q "sem_t full_sem" interprocess-communication.cpp; then
+if grep -q "sem_t g_mutex_sem" interprocess-communication.cpp && \
+   grep -q "sem_t g_empty_sem" interprocess-communication.cpp && \
+   grep -q "sem_t g_full_sem" interprocess-communication.cpp; then
     echo "✅ Kód obsahuje přesně 3 POSIX semafory"
 else
     echo "❌ Semafory nenalezeny v kódu!"
