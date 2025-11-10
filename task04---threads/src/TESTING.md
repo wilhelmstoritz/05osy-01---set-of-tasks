@@ -20,7 +20,7 @@ echo "producer" | ./socket_cl localhost 12345
 
 **Očekávané chování:**
 - Klient se připojí jako producer
-- Začne odesílat jména ze souboru `../kelvin/jmena.txt`
+- Začne odesílat jména ze souboru `jmena.txt`
 - Po naplnění bufferu (10 položek) se **zastaví** (blokuje na `sem_wait(&empty_sem)`)
 - Server zobrazí: "Buffer full, producer waiting..."
 

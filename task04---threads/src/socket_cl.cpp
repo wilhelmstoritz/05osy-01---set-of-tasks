@@ -26,7 +26,7 @@
 #include <iostream>
 
 // --- configuration -----------------------------------------------------------
-#define NAMES_FILE              "../kelvin/jmena.txt"
+#define NAMES_FILE              "jmena.txt"
 #define DEFAULT_NAMES_PER_MIN   60
 
 // --- log messages ------------------------------------------------------------
