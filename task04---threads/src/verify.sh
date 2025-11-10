@@ -31,8 +31,8 @@ fi
 # Test 3: Check jmena.txt
 echo ""
 echo "TEST 3: Kontrola souboru jmena.txt..."
-if [ -f "../kelvin/jmena.txt" ]; then
-    NAMES_COUNT=$(wc -l < "../kelvin/jmena.txt")
+if [ -f "jmena.txt" ]; then
+    NAMES_COUNT=$(wc -l < "jmena.txt")
     echo "✅ Soubor jmena.txt existuje ($NAMES_COUNT jmen)"
 else
     echo "❌ Soubor jmena.txt nenalezen!"
