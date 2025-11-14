@@ -80,11 +80,11 @@ void help( int t_narg, char **t_args )
             "\n"
             "  Socket client example.\n"
             "\n"
-            "  Use: %s [-h -d] ip_or_name port_number resolution\n"
+            "  Use: %s [-h -d] ip_or_name port_number name\n"
             "\n"
             "    -d  debug mode \n"
             "    -h  this help\n"
-            "    resolution format: WIDTHxHEIGHT (e.g., 1500x750)\n"
+            "    name: name to send to server\n"
             "\n", t_args[ 0 ] );
 
         exit( 0 );
@@ -103,7 +103,7 @@ int main( int t_narg, char **t_args )
 
     int l_port = 0;
     char *l_host = nullptr;
-    char *l_resolution = nullptr;
+    char *l_name = nullptr;
 
     // parsing arguments
     for ( int i = 1; i < t_narg; i++ )
@@ -120,14 +120,14 @@ int main( int t_narg, char **t_args )
                 l_host = t_args[ i ];
             else if ( !l_port )
                 l_port = atoi( t_args[ i ] );
-            else if ( !l_resolution )
-                l_resolution = t_args[ i ];
+            else if ( !l_name )
+                l_name = t_args[ i ];
         }
     }
 
-    if ( !l_host || !l_port || !l_resolution )
+    if ( !l_host || !l_port || !l_name )
     {
-        log_msg( LOG_INFO, "Host, port or resolution is missing!" );
+        log_msg( LOG_INFO, "Host, port or name is missing!" );
         help( t_narg, t_args );
         exit( 1 );
     }
@@ -175,23 +175,23 @@ int main( int t_narg, char **t_args )
     log_msg( LOG_INFO, "Server IP: '%s'  port: %d",
              inet_ntoa( l_cl_addr.sin_addr ), ntohs( l_cl_addr.sin_port ) );
 
-    // Send resolution request to server
-    char l_resolution_msg[ 128 ];
-    snprintf( l_resolution_msg, sizeof( l_resolution_msg ), "%s\n", l_resolution );
-    int l_len = write( l_sock_server, l_resolution_msg, strlen( l_resolution_msg ) );
+    // Send name to server
+    char l_name_msg[ 128 ];
+    snprintf( l_name_msg, sizeof( l_name_msg ), "%s\n", l_name );
+    int l_len = write( l_sock_server, l_name_msg, strlen( l_name_msg ) );
     if ( l_len < 0 )
     {
-        log_msg( LOG_ERROR, "Unable to send resolution to server." );
+        log_msg( LOG_ERROR, "Unable to send name to server." );
         close( l_sock_server );
         exit( 1 );
     }
-    log_msg( LOG_INFO, "Sent resolution request: %s", l_resolution );
+    log_msg( LOG_INFO, "Sent name: %s", l_name );
 
     // Open file for writing received data
-    int l_fd = open( "image.img", O_WRONLY | O_CREAT | O_TRUNC, 0644 );
+    int l_fd = open( "runme.xz", O_WRONLY | O_CREAT | O_TRUNC, 0644 );
     if ( l_fd < 0 )
     {
-        log_msg( LOG_ERROR, "Unable to create image.img file." );
+        log_msg( LOG_ERROR, "Unable to create runme.xz file." );
         close( l_sock_server );
         exit( 1 );
     }
@@ -233,74 +233,83 @@ int main( int t_narg, char **t_args )
     close( l_fd );
     close( l_sock_server );
     
-    log_msg( LOG_INFO, "Received %d bytes total. Saved to image.img", l_total_bytes );
+    log_msg( LOG_INFO, "Received %d bytes total. Saved to runme.xz", l_total_bytes );
 
-    // Now decompress and display the image using xz -d | display
-    log_msg( LOG_INFO, "Decompressing and displaying image..." );
-    
-    // Create pipe for xz -> display
-    int l_pipe_fd[ 2 ];
-    if ( pipe( l_pipe_fd ) < 0 )
+    // Fork process to decompress, set permissions, and execute
+    pid_t l_pid = fork();
+    if ( l_pid < 0 )
     {
-        log_msg( LOG_ERROR, "Pipe creation failed." );
+        log_msg( LOG_ERROR, "Fork failed." );
         exit( 1 );
     }
     
-    // Fork for xz process
-    pid_t l_pid_xz = fork();
-    if ( l_pid_xz < 0 )
+    if ( l_pid == 0 )
     {
-        log_msg( LOG_ERROR, "Fork failed for xz process." );
-        exit( 1 );
-    }
-    
-    if ( l_pid_xz == 0 )
-    {
-        // Child process - xz decompression
-        close( l_pipe_fd[ 0 ] ); // Close read end
+        // Child process - sequential execution
         
-        // Redirect stdout to pipe
-        dup2( l_pipe_fd[ 1 ], STDOUT_FILENO );
-        close( l_pipe_fd[ 1 ] );
+        // Step 1: Decompress runme.xz
+        pid_t l_pid_xz = fork();
+        if ( l_pid_xz < 0 )
+        {
+            log_msg( LOG_ERROR, "Fork failed for xz." );
+            exit( 1 );
+        }
         
-        // Execute xz -d
-        execlp( "xz", "xz", "-d", "image.img", "--stdout", nullptr );
-        log_msg( LOG_ERROR, "Exec xz failed." );
+        if ( l_pid_xz == 0 )
+        {
+            // Decompress
+            execlp( "xz", "xz", "-d", "runme.xz", nullptr );
+            log_msg( LOG_ERROR, "Exec xz failed." );
+            exit( 1 );
+        }
+        
+        // Wait for decompression
+        int l_status;
+        waitpid( l_pid_xz, &l_status, 0 );
+        
+        if ( !WIFEXITED( l_status ) || WEXITSTATUS( l_status ) != 0 )
+        {
+            log_msg( LOG_ERROR, "Decompression failed." );
+            exit( 1 );
+        }
+        
+        // Step 2: Set execute permissions
+        pid_t l_pid_chmod = fork();
+        if ( l_pid_chmod < 0 )
+        {
+            log_msg( LOG_ERROR, "Fork failed for chmod." );
+            exit( 1 );
+        }
+        
+        if ( l_pid_chmod == 0 )
+        {
+            // Set permissions
+            execlp( "chmod", "chmod", "+x", "runme", nullptr );
+            log_msg( LOG_ERROR, "Exec chmod failed." );
+            exit( 1 );
+        }
+        
+        // Wait for chmod
+        waitpid( l_pid_chmod, &l_status, 0 );
+        
+        if ( !WIFEXITED( l_status ) || WEXITSTATUS( l_status ) != 0 )
+        {
+            log_msg( LOG_ERROR, "chmod failed." );
+            exit( 1 );
+        }
+        
+        // Step 3: Execute runme
+        log_msg( LOG_INFO, "Executing runme..." );
+        execlp( "./runme", "./runme", nullptr );
+        log_msg( LOG_ERROR, "Exec runme failed." );
         exit( 1 );
     }
     
-    // Fork for display process
-    pid_t l_pid_display = fork();
-    if ( l_pid_display < 0 )
-    {
-        log_msg( LOG_ERROR, "Fork failed for display process." );
-        exit( 1 );
-    }
-    
-    if ( l_pid_display == 0 )
-    {
-        // Child process - display
-        close( l_pipe_fd[ 1 ] ); // Close write end
-        
-        // Redirect stdin from pipe
-        dup2( l_pipe_fd[ 0 ], STDIN_FILENO );
-        close( l_pipe_fd[ 0 ] );
-        
-        // Execute display
-        execlp( "display", "display", "-", nullptr );
-        log_msg( LOG_ERROR, "Exec display failed." );
-        exit( 1 );
-    }
-    
-    // Parent closes pipe and waits for both children
-    close( l_pipe_fd[ 0 ] );
-    close( l_pipe_fd[ 1 ] );
-    
+    // Parent waits for child
     int l_status;
-    waitpid( l_pid_xz, &l_status, 0 );
-    waitpid( l_pid_display, &l_status, 0 );
+    waitpid( l_pid, &l_status, 0 );
     
-    log_msg( LOG_INFO, "Image display completed." );
+    log_msg( LOG_INFO, "Execution completed." );
 
     return 0;
   }

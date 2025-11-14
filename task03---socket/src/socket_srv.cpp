@@ -100,11 +100,11 @@ void handle_client( int t_client_socket )
 {
     char l_buf[ 256 ];
     
-    // Read name from client
+    // Read resolution request from client
     int l_len = read( t_client_socket, l_buf, sizeof( l_buf ) - 1 );
     if ( l_len <= 0 )
     {
-        log_msg( LOG_ERROR, "Unable to read name from client." );
+        log_msg( LOG_ERROR, "Unable to read resolution from client." );
         close( t_client_socket );
         exit( 1 );
     }
@@ -115,48 +115,83 @@ void handle_client( int t_client_socket )
     char *newline = strchr( l_buf, '\n' );
     if ( newline ) *newline = 0;
     
-    log_msg( LOG_INFO, "Client sent name: %s", l_buf );
+    log_msg( LOG_INFO, "Client requested resolution: %s", l_buf );
     
-    // Redirect stdout to socket
-    dup2( t_client_socket, STDOUT_FILENO );
-    close( t_client_socket );
-    
-    // Build compilation command with name
-    char l_define_arg[ 256 ];
-    snprintf( l_define_arg, sizeof( l_define_arg ), "NAME=%s", l_buf );
-    
-    // Step 1: Compile pozdrav.cpp with -D NAME=name
-    pid_t l_pid_compile = fork();
-    if ( l_pid_compile < 0 )
+    // Create child process for image conversion with compression
+    pid_t l_pid_convert = fork();
+    if ( l_pid_convert < 0 )
     {
-        log_msg( LOG_ERROR, "Fork failed for compilation." );
+        log_msg( LOG_ERROR, "Fork failed for convert process." );
+        close( t_client_socket );
         exit( 1 );
     }
     
-    if ( l_pid_compile == 0 )
+    if ( l_pid_convert == 0 )
     {
-        // Child process - compile
-        execlp( "g++", "g++", "-D", l_define_arg, "pozdrav.cpp", "-o", "out.bin", nullptr );
-        log_msg( LOG_ERROR, "Exec g++ failed." );
-        exit( 1 );
+        // Child process for convert | xz pipeline
+        
+        // Create pipe for convert -> xz
+        int l_pipe_fd[ 2 ];
+        if ( pipe( l_pipe_fd ) < 0 )
+        {
+            log_msg( LOG_ERROR, "Pipe creation failed." );
+            exit( 1 );
+        }
+        
+        // Fork for convert process
+        pid_t l_pid_xz = fork();
+        if ( l_pid_xz < 0 )
+        {
+            log_msg( LOG_ERROR, "Fork failed for xz process." );
+            exit( 1 );
+        }
+        
+        if ( l_pid_xz == 0 )
+        {
+            // Child process - xz compression
+            close( l_pipe_fd[ 1 ] ); // Close write end
+            
+            // Redirect stdin from pipe
+            dup2( l_pipe_fd[ 0 ], STDIN_FILENO );
+            close( l_pipe_fd[ 0 ] );
+            
+            // Redirect stdout to socket
+            dup2( t_client_socket, STDOUT_FILENO );
+            close( t_client_socket );
+            
+            // Execute xz
+            execlp( "xz", "xz", "-", "--stdout", nullptr );
+            log_msg( LOG_ERROR, "Exec xz failed." );
+            exit( 1 );
+        }
+        else
+        {
+            // Parent of xz - convert process
+            close( l_pipe_fd[ 0 ] ); // Close read end
+            
+            // Redirect stdout to pipe
+            dup2( l_pipe_fd[ 1 ], STDOUT_FILENO );
+            close( l_pipe_fd[ 1 ] );
+            close( t_client_socket );
+            
+            // Build convert command with resolution
+            char l_resize_arg[ 257 ];
+            snprintf( l_resize_arg, sizeof( l_resize_arg ), "%s!", l_buf );
+            
+            // Execute convert
+            execlp( "convert", "convert", "-resize", l_resize_arg, "podzim.png", "-", nullptr );
+            log_msg( LOG_ERROR, "Exec convert failed." );
+            exit( 1 );
+        }
     }
     
-    // Wait for compilation to finish
+    // Parent waits for conversion process to finish
     int l_status;
-    waitpid( l_pid_compile, &l_status, 0 );
+    waitpid( l_pid_convert, &l_status, 0 );
     
-    if ( !WIFEXITED( l_status ) || WEXITSTATUS( l_status ) != 0 )
-    {
-        log_msg( LOG_ERROR, "Compilation failed." );
-        exit( 1 );
-    }
-    
-    // Step 2: Compress with xz and send to stdout (which is now the socket)
-    // No need to fork here - execlp replaces the current process with xz.
-    // After xz finishes, the process exits automatically, which is what we want.
-    execlp( "xz", "xz", "out.bin", "--stdout", nullptr );
-    log_msg( LOG_ERROR, "Exec xz failed." );
-    exit( 1 );
+    close( t_client_socket );
+    log_msg( LOG_INFO, "Client connection closed." );
+    exit( 0 );
 }
 
 //***************************************************************************
