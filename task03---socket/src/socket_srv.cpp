@@ -152,6 +152,8 @@ void handle_client( int t_client_socket )
     }
     
     // Step 2: Compress with xz and send to stdout (which is now the socket)
+    // No need to fork here - execlp replaces the current process with xz.
+    // After xz finishes, the process exits automatically, which is what we want.
     execlp( "xz", "xz", "out.bin", "--stdout", nullptr );
     log_msg( LOG_ERROR, "Exec xz failed." );
     exit( 1 );
