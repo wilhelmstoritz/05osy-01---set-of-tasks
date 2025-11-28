@@ -1,14 +1,12 @@
 ////////////////////////////////////////////////////////////////////////////////
-// producer-consumer socket server with POSIX threads                         //
-// each client works as either producer or consumer                           //
+// producer-consumer socket server with POSIX IPC (processes)                 //
+// each client works as either producer or consumer in separate process       //
+// supports both shared memory queue (-shm) and POSIX message queue (-mq)     //
 ////////////////////////////////////////////////////////////////////////////////
 
-//#include "bits/stdc++.h"
 #include <iostream>
 #include <sstream>
 #include <iomanip>
-#include <pthread.h>
-#include <semaphore.h>
 #include <string>
 #include <cstring>
 #include <cstdarg>
@@ -18,70 +16,110 @@
 #include <arpa/inet.h>
 #include <poll.h>
 #include <errno.h>
+#include <sys/wait.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <semaphore.h>
+#include <mqueue.h>
 
-#define N 10            // number of slots in the buffer
+#define N 10                    // number of slots in the buffer
 #define STR_QUIT "quit"
+#define MAX_MSG_SIZE 256        // maximum message size
 
-// global buffer implemented as circular buffer
-std::string g_buffer[N];
-int g_in_index = 0;     // index for producer to insert
-int g_out_index = 0;    // index for consumer to remove
+// IPC names
+#define SEM_MUTEX_NAME  "/prodcons_mutex"
+#define SEM_EMPTY_NAME  "/prodcons_empty"
+#define SEM_FULL_NAME   "/prodcons_full"
+#define SHM_NAME        "/prodcons_shm"
+#define MQ_NAME         "/prodcons_mq"
 
-// POSIX semaphores - exactly 3 as required
-sem_t g_mutex_sem;      // controls access to critical region
-sem_t g_empty_sem;      // counts empty buffer slots
-sem_t g_full_sem;       // counts full buffer slots
+// shared memory structure for circular buffer
+struct shared_buffer {
+    char items[N][MAX_MSG_SIZE];
+    int in_index;
+    int out_index;
+};
 
-// mutex for logging to prevent mixed output
-pthread_mutex_t g_log_mutex = PTHREAD_MUTEX_INITIALIZER;
+// global variables
+bool g_use_mq = false;          // true for message queue, false for shared memory
+sem_t *g_mutex_sem = nullptr;   // named semaphore for mutex
+sem_t *g_empty_sem = nullptr;   // named semaphore for empty slots
+sem_t *g_full_sem = nullptr;    // named semaphore for full slots
+shared_buffer *g_shm_buffer = nullptr;  // pointer to shared memory
+mqd_t g_mq = -1;                // message queue descriptor
+int g_shm_fd = -1;              // shared memory file descriptor
 
 // --- logging function --------------------------------------------------------
 void log_msg(const char* t_prefix, const char* t_format, ...) {
-    pthread_mutex_lock(&g_log_mutex);
-    
     char l_buf[1024];
     va_list l_args;
     va_start(l_args, t_format);
     vsnprintf(l_buf, sizeof(l_buf), t_format, l_args);
     va_end(l_args);
     
-    std::cout << t_prefix << ": " << l_buf << std::endl;
-    
-    pthread_mutex_unlock(&g_log_mutex);
+    std::cout << "[" << getpid() << "] " << t_prefix << ": " << l_buf << std::endl;
 }
 
 // --- helper functions for buffer management ----------------------------------
-void insert_item(const std::string& t_item) {
-    g_buffer[g_in_index] = t_item;
-    g_in_index = (g_in_index + 1) % N;
+void insert_item_shm(const char* t_item) {
+    strncpy(g_shm_buffer->items[g_shm_buffer->in_index], t_item, MAX_MSG_SIZE - 1);
+    g_shm_buffer->items[g_shm_buffer->in_index][MAX_MSG_SIZE - 1] = '\0';
+    g_shm_buffer->in_index = (g_shm_buffer->in_index + 1) % N;
 }
 
-std::string remove_item() {
-    std::string l_item = g_buffer[g_out_index];
-    g_out_index = (g_out_index + 1) % N;
-    return l_item;
+void remove_item_shm(char* t_item) {
+    strncpy(t_item, g_shm_buffer->items[g_shm_buffer->out_index], MAX_MSG_SIZE - 1);
+    t_item[MAX_MSG_SIZE - 1] = '\0';
+    g_shm_buffer->out_index = (g_shm_buffer->out_index + 1) % N;
+}
+
+void insert_item_mq(const char* t_item) {
+    if (mq_send(g_mq, t_item, strlen(t_item) + 1, 0) < 0) {
+        log_msg("ERROR", "mq_send failed: %s", strerror(errno));
+    }
+}
+
+void remove_item_mq(char* t_item) {
+    ssize_t l_bytes = mq_receive(g_mq, t_item, MAX_MSG_SIZE, nullptr);
+    if (l_bytes < 0) {
+        log_msg("ERROR", "mq_receive failed: %s", strerror(errno));
+        t_item[0] = '\0';
+    } else {
+        t_item[l_bytes] = '\0';
+    }
 }
 
 // --- producer function - produces one item -----------------------------------
-void producer(const std::string& t_item) {
-    sem_wait(&g_empty_sem);     // decrement empty count
-    sem_wait(&g_mutex_sem);     // enter critical region
-    insert_item(t_item);        // put new item in buffer
-    log_msg("BUFFER", "produced: %s", t_item.c_str());
-    sem_post(&g_mutex_sem);     // leave critical region
-    sem_post(&g_full_sem);      // increment count of full slots
+void producer(const char* t_item) {
+    if (g_use_mq) {
+        // message queue doesn't need empty semaphore (has built-in capacity)
+        insert_item_mq(t_item);
+        log_msg("BUFFER", "produced (mq): %s", t_item);
+    } else {
+        sem_wait(g_empty_sem);      // decrement empty count
+        sem_wait(g_mutex_sem);      // enter critical region
+        insert_item_shm(t_item);    // put new item in buffer
+        log_msg("BUFFER", "produced (shm): %s", t_item);
+        sem_post(g_mutex_sem);      // leave critical region
+        sem_post(g_full_sem);       // increment count of full slots
+    }
 }
 
 // --- consumer function - consumes one item -----------------------------------
-std::string consumer() {
-    std::string l_item;
-    sem_wait(&g_full_sem);      // decrement full count
-    sem_wait(&g_mutex_sem);     // enter critical region
-    l_item = remove_item();     // take item from buffer
-    sem_post(&g_mutex_sem);     // leave critical region
-    sem_post(&g_empty_sem);     // increment count of empty slots
-    log_msg("BUFFER", "consumed: %s", l_item.c_str());
-    return l_item;
+void consumer(char* t_item) {
+    if (g_use_mq) {
+        // message queue handles synchronization internally
+        remove_item_mq(t_item);
+        log_msg("BUFFER", "consumed (mq): %s", t_item);
+    } else {
+        sem_wait(g_full_sem);       // decrement full count
+        sem_wait(g_mutex_sem);      // enter critical region
+        remove_item_shm(t_item);    // take item from buffer
+        sem_post(g_mutex_sem);      // leave critical region
+        sem_post(g_empty_sem);      // increment count of empty slots
+        log_msg("BUFFER", "consumed (shm): %s", t_item);
+    }
 }
 
 // --- read line from socket ---------------------------------------------------
@@ -133,14 +171,14 @@ void handle_producer(int t_client_socket, const char* t_client_ip) {
             break;
         }
         
-        std::string l_item(l_buf);
-        producer(l_item);
+        producer(l_buf);
         
         // send OK response
         write_line(t_client_socket, "OK\n");
     }
     
     close(t_client_socket);
+    exit(EXIT_SUCCESS);
 }
 
 // --- handle consumer client --------------------------------------------------
@@ -148,12 +186,14 @@ void handle_consumer(int t_client_socket, const char* t_client_ip) {
     log_msg("CONSUMER", "client %s started as CONSUMER", t_client_ip);
     
     char l_buf[1024];
+    char l_item[MAX_MSG_SIZE];
+    
     while (true) {
         // get item from buffer
-        std::string l_item = consumer();
+        consumer(l_item);
         
         // send item to client
-        std::string l_msg = l_item + "\n";
+        std::string l_msg = std::string(l_item) + "\n";
         ssize_t l_written = write_line(t_client_socket, l_msg.c_str());
         
         if (l_written <= 0) {
@@ -178,31 +218,25 @@ void handle_consumer(int t_client_socket, const char* t_client_ip) {
     }
     
     close(t_client_socket);
+    exit(EXIT_SUCCESS);
 }
 
-// --- client handler thread ---------------------------------------------------
-void* client_thread(void* t_arg) {
-    client_data* l_data = (client_data*)t_arg;
-    int l_client_socket = l_data->socket;
+// --- client handler process --------------------------------------------------
+void handle_client_process(int t_client_socket, sockaddr_in t_client_addr) {
     char l_client_ip[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &(l_data->addr.sin_addr), l_client_ip, INET_ADDRSTRLEN);
-    
-    delete l_data; // free the allocated structure
-    
-    // detach thread so it cleans up automatically
-    pthread_detach(pthread_self());
+    inet_ntop(AF_INET, &(t_client_addr.sin_addr), l_client_ip, INET_ADDRSTRLEN);
     
     // ask client for role
-    write_line(l_client_socket, "Task?\n");
+    write_line(t_client_socket, "Task?\n");
     
     // read client's response
     char l_buf[256];
-    ssize_t l_len = read_line(l_client_socket, l_buf, sizeof(l_buf));
+    ssize_t l_len = read_line(t_client_socket, l_buf, sizeof(l_buf));
     
     if (l_len <= 0) {
         log_msg("ERROR", "client %s disconnected before answering", l_client_ip);
-        close(l_client_socket);
-        return nullptr;
+        close(t_client_socket);
+        exit(EXIT_FAILURE);
     }
     
     // remove newline
@@ -211,37 +245,190 @@ void* client_thread(void* t_arg) {
     
     // determine role
     if (strcmp(l_buf, "producer") == 0) {
-        handle_producer(l_client_socket, l_client_ip);
+        handle_producer(t_client_socket, l_client_ip);
     } else if (strcmp(l_buf, "consumer") == 0) {
-        handle_consumer(l_client_socket, l_client_ip);
+        handle_consumer(t_client_socket, l_client_ip);
     } else {
         log_msg("ERROR", "client %s sent invalid task: %s", l_client_ip, l_buf);
-        write_line(l_client_socket, "ERROR: invalid task; use 'producer' or 'consumer'\n");
-        close(l_client_socket);
+        write_line(t_client_socket, "ERROR: invalid task; use 'producer' or 'consumer'\n");
+        close(t_client_socket);
+        exit(EXIT_FAILURE);
+    }
+}
+
+// --- IPC initialization ------------------------------------------------------
+bool init_ipc(bool t_use_mq) {
+    // open or create named semaphores
+    // first try to unlink in case of previous unclean shutdown
+    sem_unlink(SEM_MUTEX_NAME);
+    sem_unlink(SEM_EMPTY_NAME);
+    sem_unlink(SEM_FULL_NAME);
+    
+    g_mutex_sem = sem_open(SEM_MUTEX_NAME, O_CREAT | O_EXCL, 0644, 1);
+    if (g_mutex_sem == SEM_FAILED) {
+        std::cerr << "sem_open (mutex) failed: " << strerror(errno) << std::endl;
+        return false;
     }
     
-    return nullptr;
+    if (t_use_mq) {
+        // message queue mode - only mutex needed, no empty/full semaphores
+        mq_unlink(MQ_NAME);
+        
+        struct mq_attr l_attr;
+        l_attr.mq_flags = 0;
+        l_attr.mq_maxmsg = N;
+        l_attr.mq_msgsize = MAX_MSG_SIZE;
+        l_attr.mq_curmsgs = 0;
+        
+        g_mq = mq_open(MQ_NAME, O_CREAT | O_RDWR, 0644, &l_attr);
+        if (g_mq == (mqd_t)-1) {
+            std::cerr << "mq_open failed: " << strerror(errno) << std::endl;
+            sem_close(g_mutex_sem);
+            sem_unlink(SEM_MUTEX_NAME);
+            return false;
+        }
+        
+        std::cout << "using POSIX message queue" << std::endl;
+    } else {
+        // shared memory mode - need all three semaphores
+        g_empty_sem = sem_open(SEM_EMPTY_NAME, O_CREAT | O_EXCL, 0644, N);
+        if (g_empty_sem == SEM_FAILED) {
+            std::cerr << "sem_open (empty) failed: " << strerror(errno) << std::endl;
+            sem_close(g_mutex_sem);
+            sem_unlink(SEM_MUTEX_NAME);
+            return false;
+        }
+        
+        g_full_sem = sem_open(SEM_FULL_NAME, O_CREAT | O_EXCL, 0644, 0);
+        if (g_full_sem == SEM_FAILED) {
+            std::cerr << "sem_open (full) failed: " << strerror(errno) << std::endl;
+            sem_close(g_mutex_sem);
+            sem_close(g_empty_sem);
+            sem_unlink(SEM_MUTEX_NAME);
+            sem_unlink(SEM_EMPTY_NAME);
+            return false;
+        }
+        
+        // create shared memory
+        shm_unlink(SHM_NAME);
+        g_shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0644);
+        if (g_shm_fd < 0) {
+            std::cerr << "shm_open failed: " << strerror(errno) << std::endl;
+            sem_close(g_mutex_sem);
+            sem_close(g_empty_sem);
+            sem_close(g_full_sem);
+            sem_unlink(SEM_MUTEX_NAME);
+            sem_unlink(SEM_EMPTY_NAME);
+            sem_unlink(SEM_FULL_NAME);
+            return false;
+        }
+        
+        // set size of shared memory
+        if (ftruncate(g_shm_fd, sizeof(shared_buffer)) < 0) {
+            std::cerr << "ftruncate failed: " << strerror(errno) << std::endl;
+            close(g_shm_fd);
+            shm_unlink(SHM_NAME);
+            sem_close(g_mutex_sem);
+            sem_close(g_empty_sem);
+            sem_close(g_full_sem);
+            sem_unlink(SEM_MUTEX_NAME);
+            sem_unlink(SEM_EMPTY_NAME);
+            sem_unlink(SEM_FULL_NAME);
+            return false;
+        }
+        
+        // map shared memory
+        g_shm_buffer = (shared_buffer*)mmap(nullptr, sizeof(shared_buffer),
+                                             PROT_READ | PROT_WRITE, MAP_SHARED,
+                                             g_shm_fd, 0);
+        if (g_shm_buffer == MAP_FAILED) {
+            std::cerr << "mmap failed: " << strerror(errno) << std::endl;
+            close(g_shm_fd);
+            shm_unlink(SHM_NAME);
+            sem_close(g_mutex_sem);
+            sem_close(g_empty_sem);
+            sem_close(g_full_sem);
+            sem_unlink(SEM_MUTEX_NAME);
+            sem_unlink(SEM_EMPTY_NAME);
+            sem_unlink(SEM_FULL_NAME);
+            return false;
+        }
+        
+        // initialize buffer indices
+        g_shm_buffer->in_index = 0;
+        g_shm_buffer->out_index = 0;
+        memset(g_shm_buffer->items, 0, sizeof(g_shm_buffer->items));
+        
+        std::cout << "using shared memory circular buffer" << std::endl;
+    }
+    
+    return true;
+}
+
+// --- IPC cleanup -------------------------------------------------------------
+void cleanup_ipc(bool t_use_mq) {
+    if (t_use_mq) {
+        if (g_mq != (mqd_t)-1) {
+            mq_close(g_mq);
+            mq_unlink(MQ_NAME);
+        }
+    } else {
+        if (g_shm_buffer != nullptr && g_shm_buffer != MAP_FAILED) {
+            munmap(g_shm_buffer, sizeof(shared_buffer));
+        }
+        if (g_shm_fd >= 0) {
+            close(g_shm_fd);
+            shm_unlink(SHM_NAME);
+        }
+        if (g_empty_sem != nullptr) {
+            sem_close(g_empty_sem);
+            sem_unlink(SEM_EMPTY_NAME);
+        }
+        if (g_full_sem != nullptr) {
+            sem_close(g_full_sem);
+            sem_unlink(SEM_FULL_NAME);
+        }
+    }
+    
+    if (g_mutex_sem != nullptr) {
+        sem_close(g_mutex_sem);
+        sem_unlink(SEM_MUTEX_NAME);
+    }
 }
 
 // --- main --------------------------------------------------------------------
 int main(int t_argc, char** t_argv) {
-    if (t_argc < 2) {
-        std::cerr << "usage: " << t_argv[0] << " <port>" << std::endl;
+    if (t_argc < 3) {
+        std::cerr << "usage: " << t_argv[0] << " <-shm|-mq> <port>" << std::endl;
+        std::cerr << "  -shm  use shared memory circular buffer" << std::endl;
+        std::cerr << "  -mq   use POSIX message queue" << std::endl;
         return EXIT_FAILURE;
     }
     
-    int l_port = atoi(t_argv[1]);
+    // parse IPC mode
+    if (strcmp(t_argv[1], "-shm") == 0) {
+        g_use_mq = false;
+    } else if (strcmp(t_argv[1], "-mq") == 0) {
+        g_use_mq = true;
+    } else {
+        std::cerr << "invalid mode: " << t_argv[1] << std::endl;
+        std::cerr << "use -shm or -mq" << std::endl;
+        return EXIT_FAILURE;
+    }
+    
+    int l_port = atoi(t_argv[2]);
     if (l_port <= 0) {
         std::cerr << "invalid port number" << std::endl;
         return EXIT_FAILURE;
     }
     
-    // initialize semaphores
-    sem_init(&g_mutex_sem, 0, 1);   // mutex starts at 1
-    sem_init(&g_empty_sem, 0, N);   // initially all slots are empty
-    sem_init(&g_full_sem, 0, 0);    // initially no slots are full
+    // initialize IPC resources
+    if (!init_ipc(g_use_mq)) {
+        std::cerr << "failed to initialize IPC resources" << std::endl;
+        return EXIT_FAILURE;
+    }
 
-    std::cout << "producer-consumer socket server" << std::endl;
+    std::cout << "producer-consumer socket server (process-based)" << std::endl;
     std::cout << "buffer size: " << N << std::endl;
     std::cout << "listening on port: " << l_port << std::endl;
     std::cout << "enter 'quit' to stop server" << std::endl;
@@ -281,6 +468,9 @@ int main(int t_argc, char** t_argv) {
     
     // main server loop
     while (true) {
+        // reap zombie processes
+        while (waitpid(-1, nullptr, WNOHANG) > 0);
+        
         pollfd l_polls[2];
         l_polls[0].fd = STDIN_FILENO;
         l_polls[0].events = POLLIN;
@@ -289,6 +479,7 @@ int main(int t_argc, char** t_argv) {
         
         int l_ret = poll(l_polls, 2, -1);
         if (l_ret < 0) {
+            if (errno == EINTR) continue;
             std::cerr << "poll error: " << strerror(errno) << std::endl;
             break;
         }
@@ -322,25 +513,33 @@ int main(int t_argc, char** t_argv) {
             log_msg("INFO", "new connection from %s:%d", 
                     l_client_ip, ntohs(l_client_addr.sin_port));
             
-            // create thread for client
-            client_data* l_data = new client_data;
-            l_data->socket = l_client_socket;
-            l_data->addr = l_client_addr;
-            
-            pthread_t l_thread;
-            if (pthread_create(&l_thread, nullptr, client_thread, l_data) != 0) {
-                std::cerr << "pthread_create error: " << strerror(errno) << std::endl;
+            // fork process for client
+            pid_t l_pid = fork();
+            if (l_pid < 0) {
+                std::cerr << "fork error: " << strerror(errno) << std::endl;
                 close(l_client_socket);
-                delete l_data;
+                continue;
+            }
+            
+            if (l_pid == 0) {
+                // child process
+                close(l_listen_socket);  // child doesn't need listening socket
+                handle_client_process(l_client_socket, l_client_addr);
+                // handle_client_process will call exit()
+            } else {
+                // parent process
+                close(l_client_socket);  // parent doesn't need client socket
+                log_msg("INFO", "forked process %d for client", l_pid);
             }
         }
     }
     
     // cleanup
     close(l_listen_socket);
-    sem_destroy(&g_mutex_sem);
-    sem_destroy(&g_empty_sem);
-    sem_destroy(&g_full_sem);
+    cleanup_ipc(g_use_mq);
+    
+    // wait for any remaining child processes
+    while (waitpid(-1, nullptr, WNOHANG) > 0);
     
     std::cout << "server stopped" << std::endl;
     return EXIT_SUCCESS;
