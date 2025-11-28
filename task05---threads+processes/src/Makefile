@@ -3,8 +3,9 @@ CXXFLAGS = -Wall -Wextra -std=c++11 -pthread
 LDFLAGS = -lrt -lpthread
 TARGET1 = socket_srv
 TARGET2 = socket_cl
+TARGET3 = socket_cl.processes
 
-all: $(TARGET1) $(TARGET2)
+all: $(TARGET1) $(TARGET2) $(TARGET3)
 
 $(TARGET1): socket_srv.cpp
 	$(CXX) $(CXXFLAGS) -o $(TARGET1) socket_srv.cpp $(LDFLAGS)
@@ -12,8 +13,11 @@ $(TARGET1): socket_srv.cpp
 $(TARGET2): socket_cl.cpp
 	$(CXX) $(CXXFLAGS) -o $(TARGET2) socket_cl.cpp -lpthread
 
+$(TARGET3): socket_cl.cpp
+	$(CXX) $(CXXFLAGS) -o $(TARGET3) socket_cl.cpp
+
 clean:
-	rm -f $(TARGET1) $(TARGET2)
+	rm -f $(TARGET1) $(TARGET2) $(TARGET3)
 
 run-server-shm: $(TARGET1)
 	./$(TARGET1) -shm 12345
