@@ -43,6 +43,7 @@ struct shared_buffer {
 
 // global variables
 bool g_use_mq = false;          // true for message queue, false for shared memory
+bool g_is_primary = false;      // true if this is the primary server (creates IPC)
 sem_t *g_mutex_sem = nullptr;   // named semaphore for mutex
 sem_t *g_empty_sem = nullptr;   // named semaphore for empty slots
 sem_t *g_full_sem = nullptr;    // named semaphore for full slots
@@ -258,106 +259,156 @@ void handle_client_process(int t_client_socket, sockaddr_in t_client_addr) {
 
 // --- IPC initialization ------------------------------------------------------
 bool init_ipc(bool t_use_mq) {
-    // open or create named semaphores
-    // first try to unlink in case of previous unclean shutdown
-    sem_unlink(SEM_MUTEX_NAME);
-    sem_unlink(SEM_EMPTY_NAME);
-    sem_unlink(SEM_FULL_NAME);
+    // try to create IPC resources exclusively (primary server)
+    // if that fails, try to open existing ones (secondary server)
     
+    // try to create mutex semaphore exclusively
     g_mutex_sem = sem_open(SEM_MUTEX_NAME, O_CREAT | O_EXCL, 0644, 1);
     if (g_mutex_sem == SEM_FAILED) {
-        std::cerr << "sem_open (mutex) failed: " << strerror(errno) << std::endl;
-        return false;
+        if (errno == EEXIST) {
+            // IPC already exists, open as secondary server
+            g_is_primary = false;
+            std::cout << "connecting to existing IPC resources (secondary server)" << std::endl;
+            
+            g_mutex_sem = sem_open(SEM_MUTEX_NAME, 0);
+            if (g_mutex_sem == SEM_FAILED) {
+                std::cerr << "sem_open (mutex) failed: " << strerror(errno) << std::endl;
+                return false;
+            }
+        } else {
+            std::cerr << "sem_open (mutex) failed: " << strerror(errno) << std::endl;
+            return false;
+        }
+    } else {
+        g_is_primary = true;
+        std::cout << "creating new IPC resources (primary server)" << std::endl;
     }
     
     if (t_use_mq) {
-        // message queue mode - only mutex needed, no empty/full semaphores
-        mq_unlink(MQ_NAME);
-        
-        struct mq_attr l_attr;
-        l_attr.mq_flags = 0;
-        l_attr.mq_maxmsg = N;
-        l_attr.mq_msgsize = MAX_MSG_SIZE;
-        l_attr.mq_curmsgs = 0;
-        
-        g_mq = mq_open(MQ_NAME, O_CREAT | O_RDWR, 0644, &l_attr);
-        if (g_mq == (mqd_t)-1) {
-            std::cerr << "mq_open failed: " << strerror(errno) << std::endl;
-            sem_close(g_mutex_sem);
-            sem_unlink(SEM_MUTEX_NAME);
-            return false;
+        // message queue mode
+        if (g_is_primary) {
+            struct mq_attr l_attr;
+            l_attr.mq_flags = 0;
+            l_attr.mq_maxmsg = N;
+            l_attr.mq_msgsize = MAX_MSG_SIZE;
+            l_attr.mq_curmsgs = 0;
+            
+            g_mq = mq_open(MQ_NAME, O_CREAT | O_EXCL | O_RDWR, 0644, &l_attr);
+            if (g_mq == (mqd_t)-1) {
+                std::cerr << "mq_open failed: " << strerror(errno) << std::endl;
+                sem_close(g_mutex_sem);
+                sem_unlink(SEM_MUTEX_NAME);
+                return false;
+            }
+        } else {
+            g_mq = mq_open(MQ_NAME, O_RDWR);
+            if (g_mq == (mqd_t)-1) {
+                std::cerr << "mq_open failed: " << strerror(errno) << std::endl;
+                sem_close(g_mutex_sem);
+                return false;
+            }
         }
         
         std::cout << "using POSIX message queue" << std::endl;
     } else {
         // shared memory mode - need all three semaphores
-        g_empty_sem = sem_open(SEM_EMPTY_NAME, O_CREAT | O_EXCL, 0644, N);
-        if (g_empty_sem == SEM_FAILED) {
-            std::cerr << "sem_open (empty) failed: " << strerror(errno) << std::endl;
-            sem_close(g_mutex_sem);
-            sem_unlink(SEM_MUTEX_NAME);
-            return false;
+        if (g_is_primary) {
+            g_empty_sem = sem_open(SEM_EMPTY_NAME, O_CREAT | O_EXCL, 0644, N);
+            if (g_empty_sem == SEM_FAILED) {
+                std::cerr << "sem_open (empty) failed: " << strerror(errno) << std::endl;
+                sem_close(g_mutex_sem);
+                sem_unlink(SEM_MUTEX_NAME);
+                return false;
+            }
+            
+            g_full_sem = sem_open(SEM_FULL_NAME, O_CREAT | O_EXCL, 0644, 0);
+            if (g_full_sem == SEM_FAILED) {
+                std::cerr << "sem_open (full) failed: " << strerror(errno) << std::endl;
+                sem_close(g_mutex_sem);
+                sem_close(g_empty_sem);
+                sem_unlink(SEM_MUTEX_NAME);
+                sem_unlink(SEM_EMPTY_NAME);
+                return false;
+            }
+            
+            // create shared memory
+            g_shm_fd = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0644);
+            if (g_shm_fd < 0) {
+                std::cerr << "shm_open failed: " << strerror(errno) << std::endl;
+                sem_close(g_mutex_sem);
+                sem_close(g_empty_sem);
+                sem_close(g_full_sem);
+                sem_unlink(SEM_MUTEX_NAME);
+                sem_unlink(SEM_EMPTY_NAME);
+                sem_unlink(SEM_FULL_NAME);
+                return false;
+            }
+            
+            // set size of shared memory
+            if (ftruncate(g_shm_fd, sizeof(shared_buffer)) < 0) {
+                std::cerr << "ftruncate failed: " << strerror(errno) << std::endl;
+                close(g_shm_fd);
+                shm_unlink(SHM_NAME);
+                sem_close(g_mutex_sem);
+                sem_close(g_empty_sem);
+                sem_close(g_full_sem);
+                sem_unlink(SEM_MUTEX_NAME);
+                sem_unlink(SEM_EMPTY_NAME);
+                sem_unlink(SEM_FULL_NAME);
+                return false;
+            }
+        } else {
+            // secondary server - open existing semaphores and shared memory
+            g_empty_sem = sem_open(SEM_EMPTY_NAME, 0);
+            if (g_empty_sem == SEM_FAILED) {
+                std::cerr << "sem_open (empty) failed: " << strerror(errno) << std::endl;
+                sem_close(g_mutex_sem);
+                return false;
+            }
+            
+            g_full_sem = sem_open(SEM_FULL_NAME, 0);
+            if (g_full_sem == SEM_FAILED) {
+                std::cerr << "sem_open (full) failed: " << strerror(errno) << std::endl;
+                sem_close(g_mutex_sem);
+                sem_close(g_empty_sem);
+                return false;
+            }
+            
+            g_shm_fd = shm_open(SHM_NAME, O_RDWR, 0644);
+            if (g_shm_fd < 0) {
+                std::cerr << "shm_open failed: " << strerror(errno) << std::endl;
+                sem_close(g_mutex_sem);
+                sem_close(g_empty_sem);
+                sem_close(g_full_sem);
+                return false;
+            }
         }
         
-        g_full_sem = sem_open(SEM_FULL_NAME, O_CREAT | O_EXCL, 0644, 0);
-        if (g_full_sem == SEM_FAILED) {
-            std::cerr << "sem_open (full) failed: " << strerror(errno) << std::endl;
-            sem_close(g_mutex_sem);
-            sem_close(g_empty_sem);
-            sem_unlink(SEM_MUTEX_NAME);
-            sem_unlink(SEM_EMPTY_NAME);
-            return false;
-        }
-        
-        // create shared memory
-        shm_unlink(SHM_NAME);
-        g_shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0644);
-        if (g_shm_fd < 0) {
-            std::cerr << "shm_open failed: " << strerror(errno) << std::endl;
-            sem_close(g_mutex_sem);
-            sem_close(g_empty_sem);
-            sem_close(g_full_sem);
-            sem_unlink(SEM_MUTEX_NAME);
-            sem_unlink(SEM_EMPTY_NAME);
-            sem_unlink(SEM_FULL_NAME);
-            return false;
-        }
-        
-        // set size of shared memory
-        if (ftruncate(g_shm_fd, sizeof(shared_buffer)) < 0) {
-            std::cerr << "ftruncate failed: " << strerror(errno) << std::endl;
-            close(g_shm_fd);
-            shm_unlink(SHM_NAME);
-            sem_close(g_mutex_sem);
-            sem_close(g_empty_sem);
-            sem_close(g_full_sem);
-            sem_unlink(SEM_MUTEX_NAME);
-            sem_unlink(SEM_EMPTY_NAME);
-            sem_unlink(SEM_FULL_NAME);
-            return false;
-        }
-        
-        // map shared memory
+        // map shared memory (both primary and secondary)
         g_shm_buffer = (shared_buffer*)mmap(nullptr, sizeof(shared_buffer),
                                              PROT_READ | PROT_WRITE, MAP_SHARED,
                                              g_shm_fd, 0);
         if (g_shm_buffer == MAP_FAILED) {
             std::cerr << "mmap failed: " << strerror(errno) << std::endl;
             close(g_shm_fd);
-            shm_unlink(SHM_NAME);
+            if (g_is_primary) shm_unlink(SHM_NAME);
             sem_close(g_mutex_sem);
             sem_close(g_empty_sem);
             sem_close(g_full_sem);
-            sem_unlink(SEM_MUTEX_NAME);
-            sem_unlink(SEM_EMPTY_NAME);
-            sem_unlink(SEM_FULL_NAME);
+            if (g_is_primary) {
+                sem_unlink(SEM_MUTEX_NAME);
+                sem_unlink(SEM_EMPTY_NAME);
+                sem_unlink(SEM_FULL_NAME);
+            }
             return false;
         }
         
-        // initialize buffer indices
-        g_shm_buffer->in_index = 0;
-        g_shm_buffer->out_index = 0;
-        memset(g_shm_buffer->items, 0, sizeof(g_shm_buffer->items));
+        // initialize buffer indices (only primary)
+        if (g_is_primary) {
+            g_shm_buffer->in_index = 0;
+            g_shm_buffer->out_index = 0;
+            memset(g_shm_buffer->items, 0, sizeof(g_shm_buffer->items));
+        }
         
         std::cout << "using shared memory circular buffer" << std::endl;
     }
@@ -370,7 +421,7 @@ void cleanup_ipc(bool t_use_mq) {
     if (t_use_mq) {
         if (g_mq != (mqd_t)-1) {
             mq_close(g_mq);
-            mq_unlink(MQ_NAME);
+            if (g_is_primary) mq_unlink(MQ_NAME);
         }
     } else {
         if (g_shm_buffer != nullptr && g_shm_buffer != MAP_FAILED) {
@@ -378,21 +429,21 @@ void cleanup_ipc(bool t_use_mq) {
         }
         if (g_shm_fd >= 0) {
             close(g_shm_fd);
-            shm_unlink(SHM_NAME);
+            if (g_is_primary) shm_unlink(SHM_NAME);
         }
         if (g_empty_sem != nullptr) {
             sem_close(g_empty_sem);
-            sem_unlink(SEM_EMPTY_NAME);
+            if (g_is_primary) sem_unlink(SEM_EMPTY_NAME);
         }
         if (g_full_sem != nullptr) {
             sem_close(g_full_sem);
-            sem_unlink(SEM_FULL_NAME);
+            if (g_is_primary) sem_unlink(SEM_FULL_NAME);
         }
     }
     
     if (g_mutex_sem != nullptr) {
         sem_close(g_mutex_sem);
-        sem_unlink(SEM_MUTEX_NAME);
+        if (g_is_primary) sem_unlink(SEM_MUTEX_NAME);
     }
 }
 
