@@ -1,25 +1,25 @@
 #!/bin/bash
-# Cleanup script for POSIX IPC resources
+# cleanup script for POSIX IPC resources
 
-echo "Cleaning up POSIX IPC resources..."
+echo "cleaning up POSIX IPC resources..."
 echo ""
 
-# Remove semaphores
-echo "Removing named semaphores..."
+# remove semaphores
+echo "removing named semaphores..."
 rm -f /dev/shm/sem.prodcons_* 2>/dev/null
 rm -f /dev/shm/prodcons_* 2>/dev/null
 
-# Remove message queues
-echo "Removing message queues..."
+# remove message queues
+echo "removing message queues..."
 rm -f /dev/mqueue/prodcons_* 2>/dev/null
 
 echo ""
-echo "Current IPC resources:"
+echo "current IPC resources:"
 echo "----------------------"
-echo "Shared memory objects:"
+echo "shared memory objects:"
 ls -la /dev/shm/ | grep prodcons 2>/dev/null || echo "  (none)"
 echo ""
-echo "Message queues:"
+echo "message queues:"
 ls -la /dev/mqueue/ | grep prodcons 2>/dev/null || echo "  (none)"
 echo ""
-echo "Cleanup complete!"
+echo "cleanup complete!"
