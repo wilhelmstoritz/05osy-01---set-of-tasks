@@ -7,7 +7,7 @@ TARGET3 = socket_cl.processes
 TARGET4 = socket_srv-test
 TARGET5 = socket_cl-test
 
-all: $(TARGET1) $(TARGET2) $(TARGET3)
+all: $(TARGET1) $(TARGET2) $(TARGET3) $(TARGET4) $(TARGET5)
 
 $(TARGET1): socket_srv.cpp
 	$(CXX) $(CXXFLAGS) -o $(TARGET1) socket_srv.cpp $(LDFLAGS)
@@ -19,10 +19,10 @@ $(TARGET3): socket_cl.processes.cpp
 	$(CXX) $(CXXFLAGS) -o $(TARGET3) socket_cl.processes.cpp
 
 $(TARGET4): socket_srv-test.cpp
-	$(CXX) $(CXXFLAGS) -o $(TARGET1) socket_srv-test.cpp $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) -o $(TARGET4) socket_srv-test.cpp $(LDFLAGS)
 
 $(TARGET5): socket_cl-test.cpp
-	$(CXX) $(CXXFLAGS) -o $(TARGET2) socket_cl-test.cpp -lpthread
+	$(CXX) $(CXXFLAGS) -o $(TARGET5) socket_cl-test.cpp -lpthread
 
 clean:
 	rm -f $(TARGET1) $(TARGET2) $(TARGET3) $(TARGET4) $(TARGET5)
