@@ -4,6 +4,8 @@ LDFLAGS = -lrt -lpthread
 TARGET1 = socket_srv
 TARGET2 = socket_cl
 TARGET3 = socket_cl.processes
+TARGET4 = socket_srv-test
+TARGET5 = socket_cl-test
 
 all: $(TARGET1) $(TARGET2) $(TARGET3)
 
@@ -13,17 +15,23 @@ $(TARGET1): socket_srv.cpp
 $(TARGET2): socket_cl.cpp
 	$(CXX) $(CXXFLAGS) -o $(TARGET2) socket_cl.cpp -lpthread
 
-$(TARGET3): socket_cl.cpp
-	$(CXX) $(CXXFLAGS) -o $(TARGET3) socket_cl.cpp
+$(TARGET3): socket_cl.processes.cpp
+	$(CXX) $(CXXFLAGS) -o $(TARGET3) socket_cl.processes.cpp
+
+$(TARGET4): socket_srv-test.cpp
+	$(CXX) $(CXXFLAGS) -o $(TARGET1) socket_srv-test.cpp $(LDFLAGS)
+
+$(TARGET5): socket_cl-test.cpp
+	$(CXX) $(CXXFLAGS) -o $(TARGET2) socket_cl-test.cpp -lpthread
 
 clean:
-	rm -f $(TARGET1) $(TARGET2) $(TARGET3)
+	rm -f $(TARGET1) $(TARGET2) $(TARGET3) $(TARGET4) $(TARGET5)
 
 run-server-shm: $(TARGET1)
-	./$(TARGET1) -shm 12345
+	./$(TARGET1) -shm 1234
 
 run-server-mq: $(TARGET1)
-	./$(TARGET1) -mq 12345
+	./$(TARGET1) -mq 1234
 
 run-client: $(TARGET2)
 	./$(TARGET2) localhost 12345
