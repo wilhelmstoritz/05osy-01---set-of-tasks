@@ -1,0 +1,6 @@
+[submodule "task06---rtos/kelvin/osy-freertos-posix"]
+	path = task06---rtos/kelvin/osy-freertos-posix
+	url = https://github.com/osy-cs/osy-freertos-posix
+[submodule "task06---rtos/kelvin/osy-gthreads"]
+	path = task06---rtos/kelvin/osy-gthreads
+	url = https://github.com/osy-cs/osy-gthreads
