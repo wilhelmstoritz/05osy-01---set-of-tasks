@@ -147,8 +147,8 @@ int main( int argc, char **argv ) {
         
     case 3:
         printf( "=== Running custom suspend/resume test ===\n\n" );
-        gt_go( task_worker, "Worker", &g_worker_handle );
-        gt_go( task_controller, "Controller", NULL );
+        gt_go( task_worker, "worker", &g_worker_handle );
+        gt_go( task_controller, "controller", NULL );
         break;
         
     default:
