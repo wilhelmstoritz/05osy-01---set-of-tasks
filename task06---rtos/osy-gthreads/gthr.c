@@ -14,7 +14,15 @@
 
 struct gt_context_t g_gttbl[ MaxGThreads ]; // statically allocated table for thread control
 struct gt_context_t * g_gtcur;              // pointer to current thread
+uint64_t g_start_time_ms = 0;               // scheduler start time in milliseconds
 
+// --- get current time in milliseconds ----------------------------------------
+static uint64_t gt_get_time_ms( void ) {
+    struct timeval l_tv;
+    gettimeofday( &l_tv, NULL );
+
+    return (uint64_t)l_tv.tv_sec * 1000 + l_tv.tv_usec / 1000;
+}
 
 #if ( GT_PREEMPTIVE != 0 )
 
@@ -63,7 +71,14 @@ void gt_sig_handle( int t_sig )
 {
     gt_sig_mask_reset();                // enable SIGALRM again
 
-    // .... manage timers here
+    // --- manage timers - check all blocked tasks for delay expiration --------
+    uint64_t l_now = gt_get_time_ms();
+    for ( struct gt_context_t * p = &g_gttbl[ 0 ]; p < &g_gttbl[ MaxGThreads ]; p++ ) {
+        if ( p->thread_state == Blocked && p->delay_until > 0 && l_now >= p->delay_until ) {
+            p->delay_until = 0;
+            p->thread_state = Ready;
+        }
+    }
 
     g_gt_yield_status = gt_yield();     // scheduler
 }
@@ -73,8 +88,18 @@ void gt_sig_handle( int t_sig )
 // initialize first thread as current context (and start timer)
 void gt_init( void ) 
 {
+    // --- clear all thread contexts -------------------------------------------
+    memset( g_gttbl, 0, sizeof( g_gttbl ) );
+    // -------------------------------------------------------------------------
+    
     g_gtcur = & g_gttbl[ 0 ];           // initialize current thread with thread #0
     g_gtcur -> thread_state = Running;  // set current to running
+
+    // --- set name of initial thread ------------------------------------------
+    strncpy( g_gtcur->name, "main", MaxTaskName - 1 );
+    g_gtcur->delay_until = 0;
+    
+    g_start_time_ms = gt_get_time_ms(); // remember start time
 }
 
 
@@ -91,6 +116,10 @@ void gt_stop( void )
 
 void gt_start_scheduler( void )
 {
+    // --- start time measurement ----------------------------------------------
+    g_start_time_ms = gt_get_time_ms(); // remember start time
+    // -------------------------------------------------------------------------
+
 #if ( GT_PREEMPTIVE != 0 )
     gt_sig_start();                     // gt_yield() will be called from gt_sig_handler()
     while ( g_gt_yield_status )
@@ -110,6 +139,19 @@ int gt_yield( void )
     struct gt_context_t * p;
     struct gt_regs * l_old, * l_new;
     int l_no_ready = 0;                 // not ready processes
+
+    // --- check timers and unblock tasks if delay expired ---------------------
+#if ( GT_PREEMPTIVE == 0 )
+    // In cooperative mode, check timers here
+    uint64_t l_now = gt_get_time_ms();
+    for ( struct gt_context_t * t = &g_gttbl[ 0 ]; t < &g_gttbl[ MaxGThreads ]; t++ ) {
+        if ( t->thread_state == Blocked && t->delay_until > 0 && l_now >= t->delay_until ) {
+            t->delay_until = 0;
+            t->thread_state = Ready;
+        }
+    }
+#endif
+    // -------------------------------------------------------------------------
 
     p = g_gtcur;
     while ( p -> thread_state != Ready )// iterate through g_gttbl[] until we find new thread in state Ready 
@@ -141,7 +183,7 @@ int gt_yield( void )
 
 
 // create new thread by providing pointer to function that will act like "run" method
-int gt_go( void ( * t_run )( void ) ) 
+int gt_go( void ( * t_run )( void ), const char *t_name, gt_handle_t *t_handle ) 
 {
     char * l_stack;
     struct gt_context_t * p;
@@ -160,8 +202,74 @@ int gt_go( void ( * t_run )( void ) )
     *( uint64_t * ) & l_stack[ StackSize - 16 ] = ( uint64_t ) t_run;   //  put provided function as a main "run" function
     p -> regs.rsp = ( uint64_t ) & l_stack[ StackSize - 16 ];           //  set stack pointer
     p -> thread_state = Ready;                                          //  set state
+    p -> delay_until = 0;                                               //  no delay
+    
+    // set task name
+    if ( t_name )
+        strncpy( p->name, t_name, MaxTaskName - 1 );
+    else
+        snprintf( p->name, MaxTaskName, "task%ld", p - g_gttbl );
+    p->name[ MaxTaskName - 1 ] = '\0';
+    
+    // return handle if requested
+    if ( t_handle )
+        *t_handle = p;
 
     return 0;
+}
+
+
+// --- suspend a task (NULL = current task, like FreeRTOS vTaskSuspend) --------
+void gt_suspend( gt_handle_t t_handle ) {
+    struct gt_context_t * p = t_handle ? t_handle : g_gtcur;
+    
+    if ( p->thread_state == Running || p->thread_state == Ready || p->thread_state == Blocked ) {
+        p->thread_state = Suspended;
+        p->delay_until = 0;  // cancel any pending delay
+        
+        // if suspending current task, yield to another
+        if ( p == g_gtcur )
+            gt_yield();
+    }
+}
+
+
+// --- resume a suspended task (like FreeRTOS vTaskResume) ---------------------
+void gt_resume( gt_handle_t t_handle ) {
+    if ( t_handle && t_handle->thread_state == Suspended ) {
+        t_handle->thread_state = Ready;
+    }
+}
+
+
+// --- delay current task for specified milliseconds (like FreeRTOS vTaskDelay)
+void gt_delay( uint32_t t_ms ) {
+    if ( g_gtcur == &g_gttbl[0] )
+        return;  // don't block main/scheduler thread
+    
+    g_gtcur->delay_until = gt_get_time_ms() + t_ms;
+    g_gtcur->thread_state = Blocked;
+    gt_yield();
+}
+
+
+// --- print list of all tasks (like FreeRTOS vTaskList) -----------------------
+void gt_task_list( void ) {
+    static const char * l_state_names[] = { "Unused", "Running", "Ready", "Blocked", "Suspended" };
+    
+    printf( "\n%-16s %-10s %s\n", "task name", "state", "ID" );
+    printf( "----------------------------------------\n" );
+    
+    for ( int i = 0; i < MaxGThreads; i++ ) {
+        struct gt_context_t * p = &g_gttbl[i];
+        if ( p->thread_state != Unused ) {
+            printf( "%-16s %-10s %d\n", 
+                    p->name, 
+                    l_state_names[ p->thread_state ],
+                    i );
+        }
+    }
+    printf( "\n" );
 }
 
 
